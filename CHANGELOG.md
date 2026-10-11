@@ -2,6 +2,19 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1]
+
+### 变更
+
+- **Bark 正文改用 `markdown` 参数**：粗体、标题、列表、代码块、链接由 App 渲染，不再降级成纯文本。
+  项目、分支、主机、会话 ID 和脚注收进正文末尾的引用块（显示为浅灰色）。
+  正文按字符数和 UTF-8 字节数双重截断，整条推送不超过 APNs 的 4KB 上限。
+
+### 修复
+
+- 请求带上 `User-Agent: claude-hook-notify`。自建 Bark 等服务挂在 Cloudflare 后面时，
+  Python 默认的 UA 会被 error 1010 拦截（HTTP 403）。
+
 ## [0.3.0]
 
 项目从「飞书通知插件」升级为通用的多渠道通知插件，并改名为 **claude-hook-notify**。
