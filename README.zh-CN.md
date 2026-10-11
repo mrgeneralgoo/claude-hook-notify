@@ -69,7 +69,7 @@
 | `dingtalk` | 钉钉群机器人 | `webhook_url` | `secret`（加签） | Markdown |
 | `slack` | Slack Incoming Webhook | `webhook_url` | | Block Kit |
 | `telegram` | Telegram Bot | `bot_token`、`chat_id` | | 纯文本 |
-| `bark` | Bark（iOS 推送） | `device_key` | `server`（自建服务器） | 系统推送 |
+| `bark` | Bark（iOS 推送） | `device_key` | `server`（自建服务器） | 系统推送（Markdown 正文） |
 
 每个渠道只允许发往其官方域名。使用自建 Bark 服务器或代理时，在用户配置的 `allowed_hosts` 里加上对应主机。
 
