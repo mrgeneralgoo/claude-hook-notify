@@ -120,8 +120,12 @@ class TestHugeBody(unittest.TestCase):
         t = telegram.CHANNEL.render(msg)["text"]
         self.assertLessEqual(len(t), 4096)
         self.assertIn("Claude Code · 2026", t)
-        b = bark.CHANNEL.render(msg)["body"]
-        self.assertLessEqual(len(b), 1000)
+        b = bark.CHANNEL.render(msg)
+        self.assertLessEqual(len(b["markdown"]), 1000)
+        self.assertIn("Claude Code · 2026", b["markdown"])
+        self.assertEqual(b["markdown"].count("```") % 2, 0)
+        # 整个推送要能塞进 APNs 的 4KB 负载
+        self.assertLess(len(json.dumps(b, ensure_ascii=False).encode()), 3800)
 
     def test_huge_fields_and_title_still_within_limits(self):
         msg = sample_message(title="T" * 5000, fields=[("L" * 500, "V" * 9000)] * 30,
@@ -129,7 +133,10 @@ class TestHugeBody(unittest.TestCase):
         self.assertLessEqual(len(wecom.CHANNEL.render(msg)["markdown"]["content"].encode()), 4096)
         self.assertLessEqual(len(dingtalk.CHANNEL.render(msg)["markdown"]["text"]), 5000)
         self.assertLessEqual(len(telegram.CHANNEL.render(msg)["text"]), 4096)
-        self.assertLessEqual(len(bark.CHANNEL.render(msg)["body"]), 1000)
+        b = bark.CHANNEL.render(msg)
+        self.assertLessEqual(len(b["markdown"]), 1000)
+        self.assertLessEqual(len(b["subtitle"]), 150)
+        self.assertLess(len(json.dumps(b, ensure_ascii=False).encode()), 3800)
         blocks = slack.CHANNEL.render(msg)["blocks"]
         self.assertLessEqual(len(blocks[0]["text"]["text"]), 150)
 
@@ -274,6 +281,20 @@ class TestBark(unittest.TestCase):
     def test_group_in_render(self):
         self.assertEqual(bark.CHANNEL.render(sample_message())["group"], "Claude Code")
 
+    def test_markdown_and_subtitle(self):
+        out = bark.CHANNEL.render(sample_message(body="**粗体**\n第二行\n```\ncode\n```"))
+        self.assertNotIn("body", out)                       # 传了 markdown，body 会被 Bark 忽略
+        self.assertIn("**粗体**  \n第二行  \n```\ncode\n```", out["markdown"])
+        self.assertTrue(out["markdown"].endswith("Claude Code · 2026-01-02 03:04:05"))
+        self.assertEqual(out["subtitle"], "项目: alpha · 分支: feature/x · 主机: mac-mini")
+
+    def test_no_fields_no_subtitle(self):
+        self.assertNotIn("subtitle", bark.CHANNEL.render(Message(title="t", body="b")))
+
+    def test_multibyte_body_capped_by_bytes(self):
+        out = bark.CHANNEL.render(sample_message(body="😀" * 2000))
+        self.assertLessEqual(len(out["markdown"].encode()), bark.MAX_BODY_BYTES)
+
     def test_custom_server_honored(self):
         dest = dict(DESTS["bark"], server="https://bark.example.com/")
         url, _ = bark.CHANNEL.request(dest, {})
@@ -403,6 +424,7 @@ class TestEndToEndPost(unittest.TestCase):
         def fake_urlopen(req, timeout=None):
             seen["url"] = req.full_url
             seen["data"] = json.loads(req.data.decode("utf-8"))
+            seen["ua"] = req.get_header("User-agent")
             if isinstance(response, Exception):
                 raise response
             return response
@@ -462,6 +484,7 @@ class TestEndToEndPost(unittest.TestCase):
                                         FakeResponse(200, '{"code":200,"message":"success"}'))
         self.assertTrue(ok, why)
         self.assertEqual(seen["url"], "https://api.day.app/push")
+        self.assertEqual(seen["ua"], "claude-hook-notify")   # Cloudflare 会拦 Python-urllib
         (ok, why), _ = self.run_post(DESTS["bark"], FakeResponse(200, '{"code":400,"message":"x"}'))
         self.assertFalse(ok)
         self.assertIn("400", why)

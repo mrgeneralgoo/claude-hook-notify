@@ -747,7 +747,9 @@ def post(dest: dict, payload: dict, timeout: float = 5.0,
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json; charset=utf-8"},
+            # Cloudflare 默认拦截 Python-urllib 的 UA（error 1010），自建 Bark 常挂在它后面
+            headers={"Content-Type": "application/json; charset=utf-8",
+                     "User-Agent": "claude-hook-notify"},
             method="POST",
         )
     except ValueError:
