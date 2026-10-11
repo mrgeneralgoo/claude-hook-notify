@@ -70,7 +70,7 @@ Example (Feishu card; other channels carry the same content in their own format)
 | `dingtalk` | DingTalk group bot | `webhook_url` | `secret` (signing) | Markdown |
 | `slack` | Slack incoming webhook | `webhook_url` | | Block Kit |
 | `telegram` | Telegram bot | `bot_token`, `chat_id` | | Plain text |
-| `bark` | Bark (iOS push) | `device_key` | `server` (self-hosted) | Push notification |
+| `bark` | Bark (iOS push) | `device_key` | `server` (self-hosted) | Push notification (Markdown body) |
 
 Each channel may only send to its official host. To use a self-hosted Bark server or a proxy, add the host to `allowed_hosts` in your user config.
 
