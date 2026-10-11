@@ -1,10 +1,15 @@
 {
+  "channel": "lark",
   "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "secret": "",
 
-  "webhooks": {
-    "后端群": {"webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/aaaa", "secret": ""},
-    "值班群": {"webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/bbbb", "secret": ""}
+  "destinations": {
+    "后端群": {"channel": "lark", "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/aaaa", "secret": ""},
+    "企微群": {"channel": "wecom", "webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"},
+    "钉钉群": {"channel": "dingtalk", "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=xxxx", "secret": "SECxxxx"},
+    "slack": {"channel": "slack", "webhook_url": "https://hooks.slack.com/services/T000/B000/xxxx"},
+    "telegram": {"channel": "telegram", "bot_token": "123456:ABC-xxxx", "chat_id": "123456789"},
+    "手机": {"channel": "bark", "device_key": "xxxxxxxxxxxxxxxx"}
   },
 
   "events": ["Stop", "Notification"],

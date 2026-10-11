@@ -17,15 +17,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-import lark_notify as ln  # noqa: E402
+import notify as ln  # noqa: E402
+from notify_channels import base as ch_base  # noqa: E402
+from notify_channels import lark as ch_lark  # noqa: E402
 
 
 class TestSign(unittest.TestCase):
     def test_sign_is_deterministic_base64(self):
-        s1 = ln.sign("mysecret", "1700000000")
-        s2 = ln.sign("mysecret", "1700000000")
+        s1 = ch_lark.sign("mysecret", "1700000000")
+        s2 = ch_lark.sign("mysecret", "1700000000")
         self.assertEqual(s1, s2)
-        self.assertNotEqual(s1, ln.sign("mysecret", "1700000001"))
+        self.assertNotEqual(s1, ch_lark.sign("mysecret", "1700000001"))
         # base64 of a sha256 digest is always 44 chars with padding
         self.assertEqual(len(s1), 44)
 
@@ -229,7 +231,7 @@ class TestShouldNotify(unittest.TestCase):
 
 class TestBuildCard(unittest.TestCase):
     def test_shape_and_color_fallback(self):
-        card = ln.build_card("标题", "not-a-color", "正文", [ln.field("项目", "demo")], "footer")
+        card = ch_lark.build_card("标题", "not-a-color", "正文", [ch_lark.field("项目", "demo")], "footer")
         self.assertEqual(card["msg_type"], "interactive")
         self.assertEqual(card["card"]["header"]["template"], "blue")
         self.assertEqual(card["card"]["header"]["title"]["content"], "标题")
@@ -238,7 +240,7 @@ class TestBuildCard(unittest.TestCase):
 
     def test_uses_card_schema_2_0(self):
         """v1 的 div+lark_md 渲染不了标题/列表/代码块，必须用 2.0 的 markdown 元素。"""
-        card = ln.build_card("t", "green", "## 标题\n- 列表", [ln.field("k", "v")], "f")["card"]
+        card = ch_lark.build_card("t", "green", "## 标题\n- 列表", [ch_lark.field("k", "v")], "f")["card"]
         self.assertEqual(card["schema"], "2.0")
         self.assertIn("body", card, "2.0 的元素挂在 body.elements 下")
         self.assertNotIn("elements", card, "顶层不该再有 elements")
@@ -246,18 +248,18 @@ class TestBuildCard(unittest.TestCase):
 
     def test_never_emits_note_element(self):
         """note 在 card 2.0 里会被飞书拒绝（code 11246），实测过所有写法。"""
-        card = ln.build_card("t", "green", "b", [ln.field("k", "v")], "footer")["card"]
+        card = ch_lark.build_card("t", "green", "b", [ch_lark.field("k", "v")], "footer")["card"]
         tags = [e["tag"] for e in card["body"]["elements"]]
         self.assertNotIn("note", tags)
         self.assertIn("footer", json.dumps(card, ensure_ascii=False), "脚注内容仍要在")
 
     def test_valid_color_kept(self):
-        card = ln.build_card("t", "green", "b", [], "f")
+        card = ch_lark.build_card("t", "green", "b", [], "f")
         self.assertEqual(card["card"]["header"]["template"], "green")
 
     def test_payload_is_json_serializable_with_quotes_and_newlines(self):
         nasty = 'he said "hi"\n\\ backslash\ttab 中文'
-        card = ln.build_card(nasty, "green", nasty, [ln.field("k", nasty)], nasty)
+        card = ch_lark.build_card(nasty, "green", nasty, [ch_lark.field("k", nasty)], nasty)
         roundtrip = json.loads(json.dumps(card, ensure_ascii=False))
         self.assertEqual(roundtrip["card"]["header"]["title"]["content"], nasty)
 
@@ -335,8 +337,11 @@ class TestSessionName(unittest.TestCase):
     def test_session_fields_shape(self):
         fields = ln.session_fields("3f2a9c10-1111-2222-3333-444455556666")
         self.assertEqual(len(fields), 1, "只保留会话 ID —— 会话名已经在标题里")
-        self.assertTrue(fields[0]["is_short"], "与项目/分支/主机同排，不单独占一行")
-        self.assertIn("3f2a9c10-1111-2222-3333-444455556666", fields[0]["text"]["content"])
+        label, value = fields[0]
+        self.assertEqual(label, "会话 ID")
+        self.assertIn("3f2a9c10-1111-2222-3333-444455556666", value)
+        # 飞书里与项目/分支/主机同排，不单独占一行
+        self.assertTrue(ch_lark.field(label, value)["is_short"])
 
     def test_all_meta_fields_are_short(self):
         """底部元信息排成两列，不让任何一项独占整行。"""
@@ -437,9 +442,14 @@ class ConfigSandbox(unittest.TestCase):
         self._orig_cfg_path = ln.CONFIG_PATH
         ln.CONFIG_PATH = self.user_cfg
         self.addCleanup(lambda: setattr(ln, "CONFIG_PATH", self._orig_cfg_path))
+        # 旧版路径也指进沙箱，免得测试读到本机真实的 ~/.config/claude-hook-lark
+        self._orig_legacy_path = ln.LEGACY_CONFIG_PATH
+        ln.LEGACY_CONFIG_PATH = Path(self.tmp) / "legacy.json"
+        self.addCleanup(lambda: setattr(ln, "LEGACY_CONFIG_PATH", self._orig_legacy_path))
 
         for var in ("LARK_WEBHOOK_URL", "FEISHU_WEBHOOK_URL", "LARK_WEBHOOK_SECRET",
-                    "FEISHU_WEBHOOK_SECRET", "CLAUDE_HOOK_LARK_CONFIG"):
+                    "FEISHU_WEBHOOK_SECRET", "CLAUDE_HOOK_LARK_CONFIG",
+                    "CLAUDE_HOOK_NOTIFY_CONFIG"):
             if var in os.environ:
                 old = os.environ.pop(var)
                 self.addCleanup(os.environ.__setitem__, var, old)
@@ -548,12 +558,12 @@ class TestNoWebhookLeakage(unittest.TestCase):
     TOKEN = "SECRETTOKEN"
 
     def test_malformed_url_error_hides_url(self):
-        ok, why = ln.post("not-a-url/" + self.TOKEN, {"a": 1})
+        ok, why = ln.post({"webhook_url": "not-a-url/" + self.TOKEN}, {"a": 1})
         self.assertFalse(ok)
         self.assertNotIn(self.TOKEN, why)
 
     def test_disallowed_host_error_hides_token(self):
-        ok, why = ln.post("https://evil.example.com/hook/" + self.TOKEN, {"a": 1})
+        ok, why = ln.post({"webhook_url": "https://evil.example.com/hook/" + self.TOKEN}, {"a": 1})
         self.assertFalse(ok)
         self.assertNotIn(self.TOKEN, why)
 
@@ -561,7 +571,7 @@ class TestNoWebhookLeakage(unittest.TestCase):
         # 192.0.2.0/24 是 RFC 5737 保留的 TEST-NET-1，保证不可路由，
         # 测试不会真的向飞书发包，结果也不依赖网络环境。
         url = "https://192.0.2.1/open-apis/bot/v2/hook/" + self.TOKEN
-        ok, why = ln.post(url, {"a": 1}, timeout=0.05, hosts=("192.0.2.1",))
+        ok, why = ln.post({"webhook_url": url}, {"a": 1}, timeout=0.05, hosts=("192.0.2.1",))
         self.assertFalse(ok)
         self.assertNotIn(self.TOKEN, why, "网络异常文本可能带 URL，必须只保留错误类别")
 
@@ -795,14 +805,14 @@ class TestResponseBodyNeverLeaks(unittest.TestCase):
 
     def test_http_error_body_is_omitted(self):
         url = self.serve_once(404, "<html>404 not found: /hook/TOKEN123</html>", "text/html")
-        ok, why = ln.post(url, {"a": 1})
+        ok, why = ln.post({"webhook_url": url}, {"a": 1})
         self.assertFalse(ok)
         self.assertIn("404", why, "状态码要保留")
         self.assertNotIn("TOKEN123", why, "HTTP 错误正文会回显路径，必须省略")
 
     def test_non_json_response_body_is_omitted(self):
         url = self.serve_once(200, "<html>proxy error at /hook/TOKEN123</html>", "text/html")
-        ok, why = ln.post(url, {"a": 1})
+        ok, why = ln.post({"webhook_url": url}, {"a": 1})
         self.assertFalse(ok)
         self.assertNotIn("TOKEN123", why)
 
@@ -811,7 +821,7 @@ class TestResponseBodyNeverLeaks(unittest.TestCase):
         body = json.dumps({"code": 19021,
                            "msg": "sign match fail /hook/AAAA%2DBBBB%2DTOKEN123"})
         url = self.serve_once(200, body)
-        ok, why = ln.post(url, {"a": 1})
+        ok, why = ln.post({"webhook_url": url}, {"a": 1})
         self.assertFalse(ok)
         self.assertIn("19021", why, "业务错误码要保留，排错离不开它")
         self.assertIn("签名校验失败", why, "应给出我们自己的静态说明")
@@ -820,21 +830,21 @@ class TestResponseBodyNeverLeaks(unittest.TestCase):
 
     def test_unknown_code_is_reported_without_guessing(self):
         url = self.serve_once(200, json.dumps({"code": 12345, "msg": "whatever /TOKEN123"}))
-        ok, why = ln.post(url, {"a": 1})
+        ok, why = ln.post({"webhook_url": url}, {"a": 1})
         self.assertFalse(ok)
         self.assertIn("12345", why)
         self.assertNotIn("TOKEN123", why)
 
     def test_success_is_reported(self):
         url = self.serve_once(200, json.dumps({"code": 0, "msg": "success"}))
-        ok, why = ln.post(url, {"a": 1})
+        ok, why = ln.post({"webhook_url": url}, {"a": 1})
         self.assertTrue(ok, why)
 
     def test_oversized_response_is_capped(self):
         huge = json.dumps({"code": 0, "pad": "x" * (ln.MAX_RESPONSE_BYTES * 2)})
         url = self.serve_once(200, huge)
         start = time.monotonic()
-        ok, why = ln.post(url, {"a": 1})
+        ok, why = ln.post({"webhook_url": url}, {"a": 1})
         self.assertLess(time.monotonic() - start, 10.0)
         # 被截断后不再是合法 JSON，但必须是「省略正文」的失败，而不是泄漏
         self.assertNotIn("xxxxxxxxxx", why)
@@ -866,7 +876,7 @@ class TestWatchdogIsRealWallClock(unittest.TestCase):
     def test_hook_with_blocking_stdin_exits_quickly(self):
         """端到端：写入事件后不关闭管道，hook 必须自己收场。"""
         repo = Path(__file__).resolve().parent.parent
-        script = repo / "scripts" / "lark_notify.py"
+        script = repo / "scripts" / "notify.py"
         env = dict(os.environ)
         env.pop("LARK_WEBHOOK_URL", None)
         env.pop("FEISHU_WEBHOOK_URL", None)
@@ -1050,7 +1060,7 @@ class TestWatchdogCannotBeSwallowed(unittest.TestCase):
         probe.write_text(
             "import sys, os\n"
             "sys.path.insert(0, %r)\n" % str(repo / "scripts") +
-            "import lark_notify as ln\n"
+            "import notify as ln\n"
             "ln.HOOK_BUDGET_SECONDS = 1.0\n"
             "calls = []\n"
             "ln.post = lambda *a, **k: (calls.append(1), (True, 'ok'))[1]\n"
@@ -1087,12 +1097,12 @@ class TestRemoteCodeIsNeverEchoed(unittest.TestCase):
     def test_normalize_rejects_non_numeric(self):
         for bad in ("https://open.feishu.cn/hook/TOKEN123", None, [], {}, True, False,
                     "1e5", "0x10", "9" * 40):
-            self.assertIsNone(ln._normalize_code(bad), repr(bad))
+            self.assertIsNone(ch_base.normalize_code(bad), repr(bad))
 
     def test_normalize_accepts_plain_integers(self):
-        self.assertEqual(ln._normalize_code(19021), 19021)
-        self.assertEqual(ln._normalize_code("19021"), 19021)
-        self.assertEqual(ln._normalize_code(-1), -1)
+        self.assertEqual(ch_base.normalize_code(19021), 19021)
+        self.assertEqual(ch_base.normalize_code("19021"), 19021)
+        self.assertEqual(ch_base.normalize_code(-1), -1)
 
     def test_url_in_code_field_is_not_logged(self):
         import http.server, threading
@@ -1115,7 +1125,7 @@ class TestRemoteCodeIsNeverEchoed(unittest.TestCase):
         real = ln.validate_webhook
         ln.validate_webhook = lambda url, hosts=(): (True, "")
         self.addCleanup(lambda: setattr(ln, "validate_webhook", real))
-        ok, why = ln.post("http://127.0.0.1:%d/h" % srv.server_address[1], {"a": 1})
+        ok, why = ln.post({"webhook_url": "http://127.0.0.1:%d/h" % srv.server_address[1]}, {"a": 1})
         self.assertFalse(ok)
         self.assertNotIn("TOKEN123", why)
         self.assertNotIn("open.feishu.cn", why)
@@ -1272,28 +1282,28 @@ class TestSuccessDetection(unittest.TestCase):
         return "http://127.0.0.1:%d/h" % srv.server_address[1]
 
     def test_real_success_still_works(self):
-        ok, why = ln.post(self.serve({"code": 0, "msg": "success"}), {"a": 1})
+        ok, why = ln.post({"webhook_url": self.serve({"code": 0, "msg": "success"})}, {"a": 1})
         self.assertTrue(ok, why)
 
     def test_status_code_variant_works(self):
-        ok, why = ln.post(self.serve({"StatusCode": 0}), {"a": 1})
+        ok, why = ln.post({"webhook_url": self.serve({"StatusCode": 0})}, {"a": 1})
         self.assertTrue(ok, why)
 
     def test_false_is_not_success(self):
-        ok, why = ln.post(self.serve({"code": False}), {"a": 1})
+        ok, why = ln.post({"webhook_url": self.serve({"code": False})}, {"a": 1})
         self.assertFalse(ok, "False == 0 不能算成功")
 
     def test_null_is_not_success(self):
-        self.assertFalse(ln.post(self.serve({"code": None}), {"a": 1})[0])
+        self.assertFalse(ln.post({"webhook_url": self.serve({"code": None})}, {"a": 1})[0])
 
     def test_float_zero_is_not_success(self):
-        self.assertFalse(ln.post(self.serve({"code": 0.0}), {"a": 1})[0])
+        self.assertFalse(ln.post({"webhook_url": self.serve({"code": 0.0})}, {"a": 1})[0])
 
     def test_missing_code_is_not_success(self):
-        self.assertFalse(ln.post(self.serve({"msg": "ok"}), {"a": 1})[0])
+        self.assertFalse(ln.post({"webhook_url": self.serve({"msg": "ok"})}, {"a": 1})[0])
 
     def test_string_zero_is_success(self):
-        self.assertTrue(ln.post(self.serve({"code": "0"}), {"a": 1})[0])
+        self.assertTrue(ln.post({"webhook_url": self.serve({"code": "0"})}, {"a": 1})[0])
 
 
 class TestEventsTypeIsFailClosed(ConfigSandbox):
@@ -2278,7 +2288,7 @@ class TestMalformedHookPayloadSendsNothing(unittest.TestCase):
         probe.write_text(
             "import sys\n"
             "sys.path.insert(0, %r)\n" % str(repo / "scripts") +
-            "import lark_notify as ln\n"
+            "import notify as ln\n"
             "n = []\n"
             "ln.post = lambda *a, **k: (n.append(1), (True, 'ok'))[1]\n"
             "ln.load_config = lambda *a, **k: {'webhook_url': 'https://open.feishu.cn/x',\n"
@@ -2504,6 +2514,89 @@ class TestCardTitleUsesSessionName(unittest.TestCase):
             ln.cmd_send(args)
         card = json.loads(buf.getvalue())
         self.assertNotIn("会话 ID", json.dumps(card, ensure_ascii=False))
+
+
+class TestRenameCompat(ConfigSandbox):
+    """改名为 claude-hook-notify 后，旧的路径、环境变量和键名必须继续生效。
+
+    其余用例大量使用旧名（.claude/lark.json、CLAUDE_HOOK_LARK_CONFIG），
+    本身就覆盖了旧名；这里补新名以及新旧并存时的取舍。
+    """
+
+    def write_notify_project(self, data):
+        (self.project / ".claude" / "notify.json").write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def test_legacy_user_config_used_when_new_missing(self):
+        ln.LEGACY_CONFIG_PATH.write_text(json.dumps({"webhook_url": SAFE_URL}), encoding="utf-8")
+        cfg = ln.load_config(str(self.project))
+        self.assertEqual(cfg.get("webhook_url"), SAFE_URL)
+        self.assertTrue(any("旧版配置" in w for w in cfg["_warnings"]))
+
+    def test_new_user_config_wins_over_legacy(self):
+        ln.LEGACY_CONFIG_PATH.write_text(json.dumps({"webhook_url": SAFE_URL + "-old"}),
+                                         encoding="utf-8")
+        self.write_user({"webhook_url": SAFE_URL + "-new"})
+        self.assertEqual(ln.load_config(str(self.project)).get("webhook_url"), SAFE_URL + "-new")
+
+    def test_new_explicit_env_wins_over_legacy_env(self):
+        new = Path(self.tmp) / "new.json"
+        old = Path(self.tmp) / "old.json"
+        new.write_text(json.dumps({"webhook_url": SAFE_URL + "-new"}), encoding="utf-8")
+        old.write_text(json.dumps({"webhook_url": SAFE_URL + "-old"}), encoding="utf-8")
+        os.environ["CLAUDE_HOOK_NOTIFY_CONFIG"] = str(new)
+        os.environ["CLAUDE_HOOK_LARK_CONFIG"] = str(old)
+        self.addCleanup(os.environ.pop, "CLAUDE_HOOK_NOTIFY_CONFIG", None)
+        self.addCleanup(os.environ.pop, "CLAUDE_HOOK_LARK_CONFIG", None)
+        self.assertEqual(ln.load_config(str(self.project)).get("webhook_url"), SAFE_URL + "-new")
+
+    def test_notify_json_takes_precedence_over_lark_json(self):
+        self.write_user({"webhook_url": SAFE_URL})
+        self.write_project({"events": ["Stop"]})
+        self.write_notify_project({"events": ["Notification"]})
+        cfg = ln.load_config(str(self.project))
+        self.assertEqual(ln.effective_events(cfg), ["Notification"])
+        self.assertTrue(cfg["_project_source"].endswith("notify.json"))
+
+    def test_new_selector_and_registry_names(self):
+        self.write_user({"webhook_url": SAFE_URL,
+                         "destinations": {"群": {"webhook_url": SAFE_URL + "-named", "secret": "s"}}})
+        self.write_notify_project({"destination": "群"})
+        cfg = ln.load_config(str(self.project))
+        self.assertEqual(cfg.get("webhook_url"), SAFE_URL + "-named")
+        self.assertEqual(cfg.get("secret"), "s")
+        self.assertEqual(cfg.get("channel"), "lark")
+
+    def test_project_cannot_set_channel(self):
+        self.write_user({"webhook_url": SAFE_URL})
+        self.write_notify_project({"channel": "slack"})
+        cfg = ln.load_config(str(self.project))
+        self.assertNotIn("channel", cfg)
+        self.assertEqual(ln.destination(cfg)["channel"], "lark")
+        self.assertTrue(any("channel" in w for w in cfg["_warnings"]))
+
+    def test_unknown_channel_is_fatal_and_not_revived_by_cli(self):
+        self.write_user({"channel": "pigeon", "webhook_url": SAFE_URL})
+        cfg = ln.load_config(str(self.project))
+        self.assertIn("pigeon", cfg.get("_fatal", ""))
+        self.assertIn("_fatal", ln.apply_cli_override(cfg, SAFE_URL))
+
+    def test_lark_env_replaces_other_channel_destination(self):
+        """LARK_WEBHOOK_URL 描述的是飞书目的地，必须连同渠道一起替换，不能把飞书地址配上别的渠道。"""
+        self.write_user({"channel": "lark", "webhook_url": SAFE_URL + "-user", "secret": "user"})
+        os.environ["LARK_WEBHOOK_URL"] = SAFE_URL + "-env"
+        self.addCleanup(os.environ.pop, "LARK_WEBHOOK_URL", None)
+        cfg = ln.load_config(str(self.project))
+        self.assertEqual(ln.destination(cfg),
+                         {"channel": "lark", "webhook_url": SAFE_URL + "-env", "secret": ""})
+
+    def test_hook_message_is_channel_neutral(self):
+        msg = ln.build_hook_message(
+            {"hook_event_name": "Stop", "cwd": os.getcwd(), "transcript_path": "/nope"}, {})
+        self.assertIsInstance(msg, ln.Message)
+        self.assertEqual(msg.status, "success")
+        self.assertEqual(msg.color, "", "hook 不应指定任何渠道私有的颜色")
+        self.assertTrue(all(isinstance(f, tuple) and len(f) == 2 for f in msg.fields))
 
 
 class TestVersionMetadata(unittest.TestCase):

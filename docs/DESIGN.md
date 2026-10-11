@@ -1,19 +1,53 @@
 # 设计说明
 
-这份文档记录 claude-hook-lark 的设计取舍。大部分结论来自对抗式代码审查中被实际复现出来的问题，
+这份文档记录 claude-hook-notify（原 claude-hook-lark）的设计取舍。大部分结论来自对抗式代码审查中被实际复现出来的问题，
 每一条都有对应的回归用例。日常使用不需要读这里，只在你想改代码、或想知道「为什么不那样做」时有用。
 
 贯穿全文的一条原则：**隐私与过滤开关取最严解释，传输参数退回安全默认，凭据类型非法直接停发。**
 
 ---
 
+## 零、渠道契约：内容与呈现分离
+
+```
+hook / send / doctor ──► Message ──► Channel.render ──► Channel.request ──► notify.post ──► Channel.check
+   （决定说什么）      （与渠道无关）   （怎么排版）     （拼 URL、签名）   （统一 HTTPS 出口）  （判成败）
+```
+
+- `Message`（`notify_channels/base.py`）只有标题、通用 markdown 正文、**状态**、`(标签, 值)` 字段和脚注。
+  它不含任何平台概念 —— 以前事件样式直接返回飞书颜色，现在返回状态，由各渠道自己映射成颜色、
+  字体色或干脆不上色。这是「换渠道内容不变」能成立的前提，有一个测试把同一条 `Message`
+  依次交给每个已注册渠道，断言标题、正文、字段、脚注都出现在请求体里。
+- 渠道**不自己发 HTTP**。「错误信息里永远不出现 URL」「远端返回的文本一概不记」（见第六节）
+  只在 `notify.post()` 里实现一次；渠道只提供 `render`、`request`、`check`。
+  `check` 的契约是返回值里不得含任何远端文本 —— 每个渠道都有用例往响应里埋一段带 token 的 URL，
+  断言它不会出现在返回说明里。
+- 会被拼进 URL 的凭据（Telegram 的 `bot_token`、Bark 的 `device_key` 等）由渠道按格式校验，
+  防止 `../` 或查询串注入把请求导向别的路径。
+- 目的地字段（`DEST_FIELDS`）由所有渠道的必填 + 可选字段**自动求并集**。新渠道一登记，
+  它的令牌字段就自动进入「项目配置不得设置」的名单，不需要记得去改信任边界。
+- 渠道名写错（`"channel": "pigeon"`）直接停发，不退回飞书 —— 那等于发到用户没选的地方。
+
+### 各渠道的取舍
+
+| 渠道 | 呈现 | 原因 |
+|------|------|------|
+| 飞书 | 卡片 schema 2.0 | 见下文「卡片用 schema 2.0」 |
+| 企业微信 | markdown | 群机器人 markdown 支持标题、粗体、引用和三种字体色，够用 |
+| 钉钉 | markdown | 单个换行不换行，渠道内把它转成 `  \n`（代码块内除外） |
+| Slack | Block Kit | `**粗体**` 要转成 `*粗体*`，`<`、`>`、`&` 必须转义 |
+| Telegram | 纯文本 | MarkdownV2 / HTML 都要求严格转义，Claude 回复里一个没转义的字符就会让整条消息被拒 |
+| Bark | 系统推送 | 通知中心只显示纯文本 |
+
+每个渠道都按平台文档的长度上限截断，超长回复不会导致请求被拒。
+
 ## 一、为什么用 Webhook 而不是应用凭证
 
 自定义机器人 webhook 不需要企业管理员审批、不需要维护 tenant token 缓存，一条 URL 即可用，
 最符合「零依赖、开箱即用」。
 
-如果你需要私聊推送（`app_id` / `app_secret` + `open_id`），在 `post()` 里换一个发送实现即可，
-卡片构建逻辑可以完全复用。
+如果你需要私聊推送（例如飞书的 `app_id` / `app_secret` + `open_id`），新写一个渠道即可，
+`Message` 的组装逻辑完全复用。
 
 ## 二、卡片全部用 `json.dumps` 构建
 
@@ -47,17 +81,17 @@
 
 ## 三、配置的信任边界
 
-`.claude/lark.json` 会随 `git clone` 一起进入你的机器。如果它能指定「发到哪」，
-那么克隆任何一个第三方仓库，都可能让全局启用的插件把你的提问、Claude 的回复、
+`.claude/notify.json`（旧名 `.claude/lark.json`，新文件不存在时才读）会随 `git clone` 一起进入你的机器。
+如果它能指定「发到哪」，那么克隆任何一个第三方仓库，都可能让全局启用的插件把你的提问、Claude 的回复、
 主机名和会话信息自动发往仓库作者控制的地址。
 
 因此划了一条硬边界：
 
-| 配置项 | 用户配置 / 环境变量 | 项目内 `.claude/lark.json` |
+| 配置项 | 用户配置 / 环境变量 | 项目内 `.claude/notify.json` |
 |--------|:---:|:---:|
-| `webhook_url`、`secret` | ✅ | ❌ 忽略并告警 |
-| `webhooks`、`allowed_hosts` | ✅ | ❌ 忽略并告警 |
-| `webhook`（按名字引用） | ✅ | ✅ 名字必须已在用户配置中登记 |
+| `channel` 及所有渠道的凭据字段（`webhook_url`、`secret`、`bot_token`、`chat_id`、`device_key`、`server`） | ✅ | ❌ 忽略并告警 |
+| `destinations`（旧名 `webhooks`）、`allowed_hosts` | ✅ | ❌ 忽略并告警 |
+| `destination`（旧名 `webhook`，按名字引用） | ✅ | ✅ 名字必须已在用户配置中登记 |
 | `debug` | ✅ | ❌ 忽略（否则仓库能让会话内容开始落盘） |
 | `events`、`quiet_hours`、`include_summary`、`min_duration_seconds`、`timeout` | ✅ | ⚠️ 只能收窄 |
 
@@ -84,7 +118,7 @@
 
 ### 显式配置完全接管目的地
 
-`CLAUDE_HOOK_LARK_CONFIG` 一旦生效，`webhook_url`、`secret`、具名表以及具名选择器 `webhook`
+`CLAUDE_HOOK_NOTIFY_CONFIG`（或旧名 `CLAUDE_HOOK_LARK_CONFIG`）一旦生效，`channel`、全部凭据字段、具名表以及具名选择器
 都不从用户级继承。否则一个 `{}` 或漏写 `webhook_url` 的配置仍是合法 JSON，会静默沿用上一级的群；
 而只清地址、留下选择器的话，用户级选中的名字会去命中显式配置里的同名项，一样发到没被选中的群。
 
@@ -93,12 +127,12 @@
 
 ### 目的地校验
 
-- 必须是 `https`，且主机需在 `allowed_hosts` 内（默认只允许飞书 / Lark 官方域名）。
+- 必须是 `https`，且主机需在 `allowed_hosts` 内（默认只允许当前渠道的官方域名）。
 - 主机取自 `urlsplit().hostname`，所以 `https://open.feishu.cn@attacker.com/…` 这类
   userinfo 伪装会被正确判为 `attacker.com` 并拒绝。
 - **没有「不限制」这一档**：空数组会退回官方白名单，成员校验无条件执行。
 - 项目配置**不跟随符号链接**（`O_NOFOLLOW`，并检查父目录），必须是普通文件、不超过 256 KiB，
-  且用 `O_NONBLOCK` 打开。否则仓库提交一个 `.claude/lark.json -> /dev/zero` 或一个 FIFO，
+  且用 `O_NONBLOCK` 打开。否则仓库提交一个 `.claude/notify.json -> /dev/zero` 或一个 FIFO，
   就能让每次 hook 无限阻塞。
 
 ---
@@ -111,8 +145,8 @@ JSON 里的 `"false"`、`0`、`[]`、`"60"` 在 Python 真值语境下的行为�
 
 | 配置项 | 类型非法时 | 为什么这样选 |
 |--------|-----------|-------------|
-| `webhook_url`、`secret` | **停止发送** | 凭据类型不对就没法签名 / 发送 |
-| `webhook`（具名选择器） | **停止发送** | `[]`/`0`/`false` 都是假值，会被当成「没配」而静默发往默认群 |
+| `channel`、各渠道凭据字段 | **停止发送** | 凭据类型不对就没法签名 / 发送；渠道名写错不能退回飞书 |
+| `destination` / `webhook`（具名选择器） | **停止发送** | `[]`/`0`/`false` 都是假值，会被当成「没配」而静默发往默认群 |
 | `include_summary` | 按 `false` | 写成 `"false"` 是真值，你以为关了摘要其实没关 |
 | `debug` | 按 `false` | 同上，不能让会话内容意外落盘 |
 | `events` | 一个都不发 | 笔误不该反而放宽 |
@@ -155,7 +189,7 @@ JSON 里的 `"false"`、`0`、`[]`、`"60"` 在 Python 真值语境下的行为�
 
 ---
 
-## 六、错误信息里永远不出现 webhook URL
+## 六、错误信息里永远不出现 URL 和凭据
 
 URL 里的 token 等同密码，一次拼写错误就可能把它写进日志。
 

@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""claude-hook-lark —— 把 Claude Code 的事件推送到飞书 / Lark。
+"""claude-hook-notify —— 把 Claude Code 的事件推送到飞书、企业微信、钉钉、Slack、Telegram、Bark。
 
 零第三方依赖，只使用 Python 标准库。
 
 三个子命令：
-  hook    从 stdin 读取 Claude Code hook 事件 JSON，自动组装卡片并推送
+  hook    从 stdin 读取 Claude Code hook 事件 JSON，组装通知并推送
   send    手动发送一条通知（供 skill、脚本或命令行调用）
   doctor  检查配置是否可用，可选发送一条测试消息
 
-配置查找顺序（先命中先用）：
-  1. 命令行 --webhook
-  2. 环境变量 LARK_WEBHOOK_URL / FEISHU_WEBHOOK_URL
-  3. 环境变量 CLAUDE_HOOK_LARK_CONFIG 指向的 JSON 文件
-  4. 项目内 <cwd>/.claude/lark.json
-  5. 用户级 ~/.config/claude-hook-lark/config.json
+通知内容与渠道无关（notify_channels.Message），渠道差异全部封装在
+notify_channels/ 下的各个模块里，换渠道只改配置里的 "channel"。
+
+配置查找顺序（后者覆盖前者）：
+  1. 用户级 ~/.config/claude-hook-notify/config.json
+  2. 环境变量 CLAUDE_HOOK_NOTIFY_CONFIG 指向的 JSON 文件
+  3. 项目内 <cwd>/.claude/notify.json（只能收窄行为、按名字引用目的地）
+  4. 环境变量 LARK_WEBHOOK_URL / FEISHU_WEBHOOK_URL
+  5. 命令行 --webhook
+旧版 claude-hook-lark 的路径与环境变量仍会作为后备读取。
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import errno
-import hashlib
-import hmac
 import json
 import math
 import os
@@ -40,9 +41,21 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".config" / "claude-hook-lark"
+from notify_channels import (
+    CHANNELS, DEFAULT_CHANNEL, SEND_STATUSES, STATUSES, Message,
+    destination_fields, get_channel,
+)
+
+CONFIG_DIR = Path.home() / ".config" / "claude-hook-notify"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 LOG_PATH = CONFIG_DIR / "debug.log"
+# 改名前的用户配置。新路径不存在时才读它，免得升级后通知突然断掉。
+LEGACY_CONFIG_PATH = Path.home() / ".config" / "claude-hook-lark" / "config.json"
+
+CONFIG_ENV = "CLAUDE_HOOK_NOTIFY_CONFIG"
+LEGACY_CONFIG_ENV = "CLAUDE_HOOK_LARK_CONFIG"
+PROJECT_CONFIG_NAME = "notify.json"
+LEGACY_PROJECT_CONFIG_NAME = "lark.json"
 
 DEFAULT_EVENTS = ["Stop", "Notification"]
 MAX_SUMMARY_CHARS = 600
@@ -55,31 +68,18 @@ MAX_CONFIG_BYTES = 256 << 10      # 配置文件上限，防止特殊文件无�
 MAX_RESPONSE_BYTES = 64 << 10     # 只读取有限的响应体
 MAX_TRANSCRIPT_BYTES = 16 << 20    # 只读尾部 16 MiB，够覆盖最近若干轮
 
-# 通知目的地只允许飞书/Lark 官方域名，避免会话内容被发到任意主机
-DEFAULT_ALLOWED_HOSTS = ("open.feishu.cn", "open.larksuite.com", "open.f.mioffice.cn")
+# 默认渠道（飞书）的官方域名。每个渠道各有自己的 default_hosts。
+DEFAULT_ALLOWED_HOSTS = CHANNELS[DEFAULT_CHANNEL].default_hosts
 
-# 仓库里的 .claude/lark.json 只能收窄行为，不能指定「发到哪」
+# 仓库里的 .claude/notify.json 只能收窄行为，不能指定「发到哪」。
+# "webhook" 是具名选择器的旧名，"destination" 是新名，两者等价。
 PROJECT_SAFE_KEYS = frozenset({
-    "webhook", "events", "include_summary", "min_duration_seconds",
+    "webhook", "destination", "events", "include_summary", "min_duration_seconds",
     "quiet_hours", "timeout",
 })
-DESTINATION_KEYS = frozenset({"webhook_url", "secret", "allowed_hosts", "webhooks"})
-
-# 状态 → (图标, 中文, 飞书卡片颜色)
-STATUS_STYLES = {
-    "success": ("✅", "成功", "green"),
-    "failed": ("❌", "失败", "red"),
-    "running": ("⏳", "进行中", "blue"),
-    "decision": ("🤔", "待决策", "orange"),
-    "warning": ("⚠️", "警告", "yellow"),
-    "error": ("⚠️", "异常", "carmine"),
-    "info": ("💬", "信息", "wathet"),
-}
-
-VALID_COLORS = {
-    "blue", "wathet", "turquoise", "green", "yellow", "orange",
-    "red", "carmine", "violet", "purple", "indigo", "grey",
-}
+# 目的地字段：各渠道的凭据字段并集，加上渠道选择、主机白名单和具名表
+DEST_FIELDS = destination_fields()
+DESTINATION_KEYS = DEST_FIELDS | {"channel", "allowed_hosts", "webhooks", "destinations"}
 
 
 # ── 基础工具 ────────────────────────────────────────────────────────
@@ -235,57 +235,94 @@ class Budget:
         return max(0.1, min(want, self.remaining()))
 
 
+def _normalize_aliases(data: dict) -> dict:
+    """新旧键名归一：destination → webhook（具名选择器），destinations 并入 webhooks（具名表）。
+
+    内部沿用旧键名，这样单调合并、选择器校验等逻辑只有一份。
+    同一层里两个都写了，以新名为准。
+    """
+    data = dict(data)
+    if "destination" in data:
+        data["webhook"] = data.pop("destination")
+    if "destinations" in data:
+        merged = dict(data["webhooks"]) if isinstance(data.get("webhooks"), dict) else {}
+        if isinstance(data["destinations"], dict):
+            merged.update(data["destinations"])
+            data["webhooks"] = merged
+        elif "webhooks" not in data:
+            data["webhooks"] = data["destinations"]
+        data.pop("destinations")
+    return data
+
+
+def _clear_destination(cfg: dict) -> None:
+    """换目的地时成对清空：渠道和它的全部凭据字段一起走，避免 A 渠道的密钥配上 B 的地址。"""
+    for key in DEST_FIELDS | {"channel"}:
+        cfg.pop(key, None)
+
+
 def load_config(cwd: str | None = None) -> dict:
     """按信任级别装配配置。
 
     信任模型：**通知目的地只能来自用户自己掌握的位置** —— 环境变量、
-    ~/.config/claude-hook-lark/config.json、或 CLAUDE_HOOK_LARK_CONFIG 指向的文件。
-    仓库里的 <cwd>/.claude/lark.json 会随 git clone 进入机器，因此只允许它
-    收窄行为（开关事件、静默时段等），或用 "webhook" 字段**按名字**引用
-    用户配置里已登记的地址，绝不能自带 URL。
+    ~/.config/claude-hook-notify/config.json、或 CLAUDE_HOOK_NOTIFY_CONFIG 指向的文件。
+    仓库里的 <cwd>/.claude/notify.json 会随克隆进入机器，因此只允许它
+    收窄行为（开关事件、静默时段等），或用 "destination" 字段**按名字**引用
+    用户配置里已登记的目的地，绝不能自带 URL、令牌或渠道。
     """
     cfg: dict = {}
     warnings: list[str] = []
-    registry: dict = {}     # 具名 webhook 只从可信来源累积
+    registry: dict = {}     # 具名目的地只从可信来源累积
 
-    # 1) 用户级配置（可信）
-    user_cfg, err = read_json_file(CONFIG_PATH)
+    # 1) 用户级配置（可信）。新路径不存在时退回改名前的旧路径
+    user_path = CONFIG_PATH
+    if not user_path.exists() and LEGACY_CONFIG_PATH.exists():
+        user_path = LEGACY_CONFIG_PATH
+        warnings.append("正在使用旧版配置 %s，建议移动到 %s" % (LEGACY_CONFIG_PATH, CONFIG_PATH))
+    user_cfg, err = read_json_file(user_path)
     if err:
         warnings.append(err)
     if user_cfg:
+        user_cfg = _normalize_aliases(user_cfg)
         cfg.update(user_cfg)
         if isinstance(user_cfg.get("webhooks"), dict):
             registry.update(user_cfg["webhooks"])
-        cfg["_source"] = str(CONFIG_PATH)
+        cfg["_source"] = str(user_path)
 
     # 2) 显式指定的配置文件（可信——是用户自己设的环境变量）
-    explicit = os.environ.get("CLAUDE_HOOK_LARK_CONFIG")
+    env_name = CONFIG_ENV if os.environ.get(CONFIG_ENV) else LEGACY_CONFIG_ENV
+    explicit = os.environ.get(env_name)
     if explicit:
         data, err = read_json_file(Path(explicit))
         if err or data is None:
             # 用户明确指定了配置文件却读不成：停发。回落到用户级配置
-            # 等于把内容发到一个他刚刚显式覆盖掉的群。
-            msg = err or "CLAUDE_HOOK_LARK_CONFIG 指向的文件不存在：%s" % explicit
+            # 等于把内容发到一个他刚刚显式覆盖掉的目的地。
+            msg = err or "%s 指向的文件不存在：%s" % (env_name, explicit)
             warnings.append(msg)
             cfg["_fatal"] = msg
         else:
             # 显式配置一旦生效就完全接管目的地：先清掉从用户级继承来的
-            # webhook_url / secret / 具名表，否则一个 {} 或漏写 webhook_url 的配置
-            # 会静默沿用上一级的群，等于绕过了「显式配置失效不得回退」。
-            for key in ("webhook_url", "secret", "webhook", "webhooks"):
+            # 渠道 / 凭据 / 具名表，否则一个 {} 或漏写 webhook_url 的配置
+            # 会静默沿用上一级的目的地，等于绕过了「显式配置失效不得回退」。
+            _clear_destination(cfg)
+            for key in ("webhook", "webhooks"):
                 cfg.pop(key, None)
             registry.clear()
+            data = _normalize_aliases(data)
             cfg.update(data)
             if isinstance(data.get("webhooks"), dict):
                 registry.update(data["webhooks"])
-            cfg["_source"] = "%s (CLAUDE_HOOK_LARK_CONFIG)" % explicit
+            cfg["_source"] = "%s (%s)" % (explicit, env_name)
 
-    # 3) 项目级配置（不可信：只取安全键）
-    project_path = Path(cwd or os.getcwd()) / ".claude" / "lark.json"
+    # 3) 项目级配置（不可信：只取安全键）。notify.json 不存在时退回旧名 lark.json
+    claude_dir = Path(cwd or os.getcwd()) / ".claude"
+    project_path = claude_dir / PROJECT_CONFIG_NAME
+    if not os.path.lexists(str(project_path)):
+        project_path = claude_dir / LEGACY_PROJECT_CONFIG_NAME
     # allow_symlink=False：这是不可信来源，不能跟随符号链接到特殊文件
     project_cfg, err = read_json_file(project_path, allow_symlink=False)
     if err:
-        # 项目配置坏了就整体停发，而不是悄悄退回全局群
+        # 项目配置坏了就整体停发，而不是悄悄退回全局目的地
         warnings.append(err)
         cfg["_fatal"] = err
     elif project_cfg:
@@ -293,10 +330,10 @@ def load_config(cwd: str | None = None) -> dict:
         if rejected:
             warnings.append(
                 "已忽略项目配置 %s 中的 %s：仓库内文件不允许指定通知目的地。"
-                "如需按项目分流，请在用户配置的 webhooks 里登记后用 \"webhook\": \"名字\" 引用。"
+                "如需按项目分流，请在用户配置的 destinations 里登记后用 \"destination\": \"名字\" 引用。"
                 % (project_path, "、".join(rejected))
             )
-        safe = {k: v for k, v in project_cfg.items() if k in PROJECT_SAFE_KEYS}
+        safe = _normalize_aliases({k: v for k, v in project_cfg.items() if k in PROJECT_SAFE_KEYS})
         if safe:
             # 必须**先各自校验再合并**：直接拿原始值合并的话，
             #   用户 quiet_hours:[] 非法 + 项目 [22,8] => 合并出合法值，
@@ -308,32 +345,39 @@ def load_config(cwd: str | None = None) -> dict:
             cfg = merge_project_config(cfg, safe, warnings)
             cfg["_project_source"] = str(project_path)
 
-    # 4) 具名 webhook：把名字解析成可信来源里登记的地址+密钥（成对加载）
+    # 4) 具名目的地：把名字解析成可信来源里登记的渠道+凭据（成对加载）
     validate_selector(cfg, warnings)
     name = cfg.pop("webhook", "")
     if name:
         entry = registry.get(name)
         if isinstance(entry, str):
-            entry = {"webhook_url": entry}
-        if isinstance(entry, dict) and entry.get("webhook_url"):
-            cfg["webhook_url"] = entry["webhook_url"]
-            cfg["secret"] = entry.get("secret", "")   # 成对覆盖，避免 URL/密钥错配
-            cfg["_source"] = "%s → webhooks[%s]" % (cfg.get("_source", "用户配置"), name)
+            entry = {"webhook_url": entry}      # 旧写法：值直接是飞书地址
+        channel = get_channel(entry.get("channel")) if isinstance(entry, dict) else None
+        if channel and all(entry.get(k) for k in channel.required):
+            # 成对覆盖：渠道与全部凭据字段一起换，避免 URL/密钥错配
+            _clear_destination(cfg)
+            cfg["channel"] = channel.name
+            for key in channel.dest_keys:
+                if key in entry:
+                    cfg[key] = entry[key]
+            cfg["_source"] = "%s → destinations[%s]" % (cfg.get("_source", "用户配置"), name)
         else:
-            msg = "配置引用了未登记的 webhook 名称 \"%s\"，已停止发送。" % name
+            msg = "配置引用了未登记或不完整的目的地名称 \"%s\"，已停止发送。" % name
             warnings.append(msg)
             cfg["_fatal"] = msg
 
-    # 5) 环境变量优先级最高（可信）
+    # 5) 环境变量优先级最高（可信）。这组变量只描述飞书目的地
     env_url = os.environ.get("LARK_WEBHOOK_URL") or os.environ.get("FEISHU_WEBHOOK_URL")
     if env_url:
+        _clear_destination(cfg)
+        cfg["channel"] = "lark"
         cfg["webhook_url"] = env_url
         cfg["secret"] = os.environ.get("LARK_WEBHOOK_SECRET") or os.environ.get(
             "FEISHU_WEBHOOK_SECRET") or ""
         cfg["_source"] = "环境变量 LARK_WEBHOOK_URL/FEISHU_WEBHOOK_URL"
     else:
         env_secret = os.environ.get("LARK_WEBHOOK_SECRET") or os.environ.get("FEISHU_WEBHOOK_SECRET")
-        if env_secret:
+        if env_secret and active_channel(cfg) is CHANNELS["lark"]:
             cfg["secret"] = env_secret
 
     validate_config(cfg, warnings)
@@ -347,6 +391,23 @@ def load_config(cwd: str | None = None) -> dict:
     return cfg
 
 
+def active_channel(cfg: dict):
+    """当前配置选中的渠道；channel 非法时返回 None（validate_credentials 会让它停发）。"""
+    return get_channel(cfg.get("channel"))
+
+
+def destination(cfg: dict) -> dict:
+    """从配置里抽出当前目的地：渠道名 + 该渠道认的凭据字段。"""
+    channel = active_channel(cfg)
+    if channel is None:
+        return {}
+    dest = {"channel": channel.name}
+    for key in channel.dest_keys:
+        if key in cfg:
+            dest[key] = cfg[key]
+    return dest
+
+
 def _type_name(value) -> str:
     return type(value).__name__
 
@@ -358,7 +419,7 @@ def validate_credentials(cfg: dict, warnings: list) -> None:
     （最高优先级）给了正确地址时，通知本该正常发出，却因为早先写下的 _fatal
     被跳过 —— 而且这个行为还取决于「项目配置存不存在」，因为那才会触发早校验。
     """
-    for key in ("webhook_url", "secret"):
+    for key in sorted(DEST_FIELDS):
         if key in cfg and not isinstance(cfg[key], str):
             msg = "%s 必须是字符串（当前是 %s），已停止发送。" % (key, _type_name(cfg[key]))
             warnings.append(msg)
@@ -366,6 +427,14 @@ def validate_credentials(cfg: dict, warnings: list) -> None:
             # 标明这条 fatal 只是因为凭据类型不对 —— 更高优先级的来源
             # （环境变量、命令行 --webhook）给出合法地址时可以撤销它
             cfg["_fatal_kind"] = "credentials"
+    # 渠道名写错不能退回飞书：那等于把内容发到用户没选的地方。放在最后，
+    # 让它覆盖凭据类 fatal —— 命令行 --webhook 救不了一个不存在的渠道。
+    if "channel" in cfg and active_channel(cfg) is None:
+        msg = "channel 必须是已支持的渠道名（%s），当前是 %r，已停止发送。" % (
+            "、".join(sorted(CHANNELS)), cfg["channel"])
+        warnings.append(msg)
+        cfg["_fatal"] = msg
+        cfg.pop("_fatal_kind", None)
 
 
 def validate_selector(cfg: dict, warnings: list) -> None:
@@ -399,7 +468,7 @@ def validate_config(cfg: dict, warnings: list) -> None:
     # —— 隐私开关：非 boolean 一律按 false ——
     if "include_summary" in cfg and not isinstance(cfg["include_summary"], bool):
         warnings.append(
-            "include_summary 必须是 true 或 false（当前是 %s），已按 false 处理，卡片不含会话摘要。"
+            "include_summary 必须是 true 或 false（当前是 %s），已按 false 处理，通知不含会话摘要。"
             % _type_name(cfg["include_summary"]))
         cfg["include_summary"] = False
 
@@ -532,7 +601,7 @@ def merge_project_config(cfg: dict, project: dict, warnings: list | None = None)
 
 
 def apply_cli_override(cfg: dict, webhook: str) -> dict:
-    """把命令行 --webhook 作为**最高优先级**并入配置。
+    """把命令行 --webhook 作为**最高优先级**并入配置（作用于当前渠道）。
 
     以前 CLI 覆盖发生在 _fatal 检查之后，于是「配置里的 webhook_url 类型写错」
     会让一个完全合法的 --webhook 也发不出去 —— 与文档声明的优先级相悖。
@@ -540,8 +609,11 @@ def apply_cli_override(cfg: dict, webhook: str) -> dict:
     if not webhook:
         return cfg
     cfg = dict(cfg)
+    channel = cfg.get("channel")
+    _clear_destination(cfg)          # 换了地址就不该继续用旧密钥签名
+    if channel is not None:
+        cfg["channel"] = channel
     cfg["webhook_url"] = webhook
-    cfg.pop("secret", None)          # 换了地址就不该继续用旧密钥签名
     if cfg.get("_fatal_kind") == "credentials":
         cfg.pop("_fatal", None)
         cfg.pop("_fatal_kind", None)
@@ -549,10 +621,12 @@ def apply_cli_override(cfg: dict, webhook: str) -> dict:
 
 
 def allowed_hosts(cfg: dict) -> tuple:
+    """生效的主机白名单：用户的 allowed_hosts 整体替换当前渠道的官方域名。"""
     hosts = cfg.get("allowed_hosts", None)
     if isinstance(hosts, (list, tuple)) and hosts:
         return tuple(str(h).lower() for h in hosts)
-    return DEFAULT_ALLOWED_HOSTS
+    channel = active_channel(cfg)
+    return channel.default_hosts if channel else DEFAULT_ALLOWED_HOSTS
 
 
 def validate_webhook(url: str, hosts: tuple = DEFAULT_ALLOWED_HOSTS) -> tuple[bool, str]:
@@ -582,7 +656,7 @@ def validate_webhook(url: str, hosts: tuple = DEFAULT_ALLOWED_HOSTS) -> tuple[bo
 
 
 def mask(url: str) -> str:
-    """脱敏展示。飞书 webhook 的 token 在路径末段，只保留固定前缀。"""
+    """脱敏展示。token 常在路径或查询串里，只保留协议和主机。"""
     if not url:
         return "(未配置)"
     try:
@@ -594,35 +668,6 @@ def mask(url: str) -> str:
 
 
 # ── 发送 ────────────────────────────────────────────────────────────
-
-# 飞书业务错误码 → 我们自己的静态说明。
-# 只收录亲自验证过含义的码；其余一律只报数字，不猜、也不回显远端文案。
-KNOWN_ERROR_CODES = {
-    19021: "签名校验失败，或时间戳超出 1 小时（检查 secret 是否与机器人一致）",
-}
-
-
-def _normalize_code(value) -> int | None:
-    """把远端 code 规范成有限范围内的整数；不合规一律丢弃，不回显原值。"""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if -1_000_000 < value < 1_000_000 else None
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        try:
-            num = int(value.strip())
-        except ValueError:
-            return None
-        return num if -1_000_000 < num < 1_000_000 else None
-    return None
-
-
-def describe_error_code(code) -> str:
-    try:
-        return KNOWN_ERROR_CODES[int(code)]
-    except (TypeError, ValueError, KeyError):
-        return "含义参见飞书开放平台文档"
-
 
 def scrub_url(text: str, url: str) -> str:
     """从任意文本里抹掉 webhook URL 及其 token 片段。
@@ -660,36 +705,53 @@ def scrub_url(text: str, url: str) -> str:
     return text
 
 
-def sign(secret: str, timestamp: str) -> str:
-    """飞书自定义机器人签名校验：以 '<timestamp>\\n<secret>' 为 key，空串为消息体。"""
-    string_to_sign = "%s\n%s" % (timestamp, secret)
-    digest = hmac.new(string_to_sign.encode("utf-8"), b"", digestmod=hashlib.sha256).digest()
-    return base64.b64encode(digest).decode("utf-8")
+def prepare_request(dest: dict, payload: dict, hosts: tuple | None = None):
+    """把目的地 + 渲染好的请求体变成 (是否可发, 原因, 最终 URL, 最终请求体)。
+
+    原因里只会出现字段名和主机名，不会出现任何凭据。
+    """
+    dest = dest or {}
+    channel = get_channel(dest.get("channel"))
+    if channel is None:
+        return False, "未知的通知渠道", "", {}
+    for key in channel.dest_keys:
+        if key in dest and not isinstance(dest[key], str):
+            return False, "%s 必须是字符串" % key, "", {}
+    missing = [k for k in channel.required if not dest.get(k)]
+    if missing:
+        return False, "未配置 %s" % "、".join(missing), "", {}
+    try:
+        url, body = channel.request(dest, payload)
+    except Exception as e:
+        # 不格式化异常本身：它可能带着凭据
+        return False, "%s 目的地配置非法（%s）" % (channel.label, type(e).__name__), "", {}
+    ok, why = validate_webhook(url, hosts or channel.default_hosts)
+    return ok, why, url, body
 
 
-def post(webhook_url: str, payload: dict, secret: str = "", timeout: float = 5.0,
-         hosts: tuple = DEFAULT_ALLOWED_HOSTS) -> tuple[bool, str]:
-    """POST 到飞书 webhook。返回 (是否成功, 说明)。不抛异常，说明里不含 URL。"""
-    ok, why = validate_webhook(webhook_url, hosts)
+def post(dest: dict, payload: dict, timeout: float = 5.0,
+         hosts: tuple | None = None) -> tuple[bool, str]:
+    """把渲染好的请求体发往目的地。返回 (是否成功, 说明)。不抛异常，说明里不含 URL。
+
+    所有渠道共用这一个 HTTPS 出口：有界读取响应、不回显远端文本、
+    不格式化可能带 URL 的异常 —— 这些约束只在这里实现一次。
+    成败判定交给渠道自己的 check()。
+    """
+    ok, why, url, body = prepare_request(dest, payload, hosts)
     if not ok:
         return False, why
-    body = dict(payload)
-    if secret:
-        ts = str(int(time.time()))
-        body["timestamp"] = ts
-        body["sign"] = sign(secret, ts)
-
+    channel = get_channel(dest.get("channel"))
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     try:
         # Request() 对畸形 URL 抛的 ValueError 消息里含完整 URL，必须就地拦下
         req = urllib.request.Request(
-            webhook_url,
+            url,
             data=data,
             headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST",
         )
     except ValueError:
-        return False, "webhook URL 格式非法（已隐去内容）"
+        return False, "目的地 URL 格式非法（已隐去内容）"
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             status = getattr(resp, "status", None)
@@ -697,20 +759,10 @@ def post(webhook_url: str, payload: dict, secret: str = "", timeout: float = 5.0
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
-            # 绝不回显响应正文：代理或错误页可能把请求 URL（含 token）原样打回来
-            return False, "响应不是 JSON（HTTP %s，%d 字节）" % (status, len(raw))
-        # 必须先规范化再判成功：Python 里 False == 0、0.0 == 0，
-        # 直接写 `raw in (0, None)` 会把 {"code": false}、{"code": null}
-        # 乃至缺失 code 的畸形响应当成发送成功。
-        raw_code = parsed.get("code", parsed.get("StatusCode"))
-        code = _normalize_code(raw_code)
-        if code is None:
-            return False, "响应错误码格式非法或缺失（正文已省略）"
-        if code == 0:
-            return True, "ok"
-        # 绝不回显远端文案。脱敏是模式匹配，挡不住任意编码变体
-        #（例如把连字符也百分号编码），所以这里直接换成我们自己的静态说明。
-        return False, "飞书返回 code=%s（%s）" % (code, describe_error_code(code))
+            parsed = None
+        # 渠道契约：check() 的说明里绝不回显远端文本（代理或错误页可能把含 token 的
+        # 请求 URL 原样打回来）。脱敏是模式匹配，挡不住任意编码变体，所以干脆不回显。
+        return channel.check(status, parsed, raw)
     except urllib.error.HTTPError as e:
         # 同理，HTTPError 的 body 不可信，只保留状态码
         return False, "HTTP %s（响应正文已省略）" % e.code
@@ -720,47 +772,10 @@ def post(webhook_url: str, payload: dict, secret: str = "", timeout: float = 5.0
         return False, "网络错误: %s" % type(inner if inner is not None else e).__name__
 
 
-# ── 卡片构建 ────────────────────────────────────────────────────────
-
-def field(label: str, value: str, short: bool = True) -> dict:
-    return {
-        "is_short": short,
-        "text": {"tag": "lark_md", "content": "**%s**\n%s" % (label, value or "-")},
-    }
-
-
-def build_card(title: str, color: str, body: str, fields: list[dict], footer: str) -> dict:
-    """构建飞书卡片（schema 2.0）。
-
-    为什么用 2.0 而不是 v1：v1 的正文是 `div` + `lark_md`，而 lark_md 只支持
-    粗体、行内代码、链接这一小撮语法 —— Claude 回复里常见的标题（##）、列表、
-    代码块、引用统统会以原文形式露出来。2.0 的 `markdown` 元素支持完整得多。
-
-    2.0 的几个坑（都是对着真实 API 试出来的）：
-      - `note` 元素**不被接受**（code 11246），无论 elements 里放 plain_text、
-        markdown 还是 text，也无论换成 `text` 字段。脚注只能用 markdown 元素代替。
-      - `hr`、`div`（含 fields 写法）、`column_set` 在 2.0 里仍然可用。
-      - 元素挂在 `body.elements` 下，不再是顶层 `elements`。
-    """
-    elements: list[dict] = [{"tag": "markdown", "content": body or "-"}]
-    if fields:
-        elements.append({"tag": "hr"})
-        # fields 是 div 独有的能力，2.0 里依然有效；它只需要粗体，lark_md 够用
-        elements.append({"tag": "div", "fields": fields})
-    elements.append({"tag": "markdown",
-                     "content": "<font color='grey'>%s</font>" % footer})
-    return {
-        "msg_type": "interactive",
-        "card": {
-            "schema": "2.0",
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": title},
-                "template": color if color in VALID_COLORS else "blue",
-            },
-            "body": {"elements": elements},
-        },
-    }
+def render(cfg: dict, msg: Message) -> dict:
+    """用当前渠道渲染消息。渠道非法时（已有 _fatal）退回默认渠道，只用于 dry-run 预览。"""
+    channel = active_channel(cfg) or CHANNELS[DEFAULT_CHANNEL]
+    return channel.render(msg)
 
 
 # ── 运行环境信息 ────────────────────────────────────────────────────
@@ -1082,14 +1097,14 @@ def card_subject(session_name: str, project: str) -> str:
     return truncate(name, MAX_SUBJECT_CHARS) if name else project
 
 
-def session_fields(session_id: str) -> list[dict]:
+def session_fields(session_id: str) -> list[tuple]:
     """会话 ID 与项目/分支/主机同排展示，不单独占一行。
 
     会话名不再单列字段 —— 它已经在标题里了，重复一遍纯属浪费卡片空间。
     """
     if not session_id:
         return []
-    return [field("会话 ID", "`%s`" % session_id)]
+    return [("会话 ID", "`%s`" % session_id)]
 
 
 # Claude Code 会把 slash command、本地命令输出、记忆输入等也写成 type=user 的记录，
@@ -1202,21 +1217,21 @@ def in_quiet_hours(quiet, now_hour: int | None = None) -> bool:
 # ── hook 模式 ───────────────────────────────────────────────────────
 
 def event_style(event_name: str, payload: dict) -> tuple[str, str, str]:
-    """返回 (标题前缀, 颜色, 正文标题)。"""
+    """返回 (标题前缀, 状态, 正文标题)。状态如何上色由各渠道自己决定。"""
     if event_name == "Stop":
-        return "✅ 任务完成", "green", "**Claude Code 已完成本轮任务**"
+        return "✅ 任务完成", "success", "**Claude Code 已完成本轮任务**"
     if event_name == "SubagentStop":
-        return "📦 子任务完成", "turquoise", "**子任务执行完成**"
+        return "📦 子任务完成", "subtask", "**子任务执行完成**"
     if event_name == "Notification":
         message = (payload.get("message") or "").strip()
         if "permission" in message.lower() or "授权" in message:
-            return "🔐 需要授权", "orange", "**Claude Code 需要你的授权才能继续**"
-        return "⏳ 等待输入", "yellow", "**Claude Code 正在等待你的输入**"
+            return "🔐 需要授权", "decision", "**Claude Code 需要你的授权才能继续**"
+        return "⏳ 等待输入", "warning", "**Claude Code 正在等待你的输入**"
     if event_name == "SessionEnd":
-        return "👋 会话结束", "grey", "**Claude Code 会话已结束**"
+        return "👋 会话结束", "ended", "**Claude Code 会话已结束**"
     if event_name == "SessionStart":
-        return "🚀 会话开始", "blue", "**Claude Code 会话已启动**"
-    return "🔔 Claude Code", "blue", "**状态更新**"
+        return "🚀 会话开始", "running", "**Claude Code 会话已启动**"
+    return "🔔 Claude Code", "running", "**状态更新**"
 
 
 def summary_enabled(cfg: dict) -> bool:
@@ -1228,10 +1243,17 @@ def summary_enabled(cfg: dict) -> bool:
 
 def build_hook_payload(payload: dict, cfg: dict, stats: dict | None = None,
                        budget: "Budget | None" = None) -> dict:
+    """组装本次事件的通知，并用当前渠道渲染成请求体。"""
+    return render(cfg, build_hook_message(payload, cfg, stats, budget))
+
+
+def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
+                       budget: "Budget | None" = None) -> Message:
+    """组装本次事件的通知内容。与渠道无关：换渠道时这里产出的内容不变。"""
     event_name = payload.get("hook_event_name") or "Stop"
     cwd = payload.get("cwd") or os.getcwd()
     git = git_info(cwd, budget)
-    prefix, color, headline = event_style(event_name, payload)
+    prefix, status, headline = event_style(event_name, payload)
     name = project_name(cwd, git)
 
     lines = [headline]
@@ -1271,17 +1293,17 @@ def build_hook_payload(payload: dict, cfg: dict, stats: dict | None = None,
         lines.append(" · ".join(meta))
 
     fields = [
-        field("项目", name),
-        field("分支", git.get("branch") or stats.get("git_branch") or "-"),
-        field("主机", hostname()),
+        ("项目", name),
+        ("分支", git.get("branch") or stats.get("git_branch") or "-"),
+        ("主机", hostname()),
     ]
     fields.extend(session_fields(session_id))
 
     footer = "Claude Code · %s · %s" % (
         event_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
-    return build_card("%s · %s" % (prefix, card_subject(session_name, name)),
-                      color, "\n".join(lines), fields, footer)
+    return Message(title="%s · %s" % (prefix, card_subject(session_name, name)),
+                   body="\n".join(lines), status=status, fields=fields, footer=footer)
 
 
 def duration_lower_bound(stats: dict) -> float | None:
@@ -1425,20 +1447,15 @@ def _run_hook(args, budget: Budget) -> int:
             print("skip: %s" % reason)
         return 0
 
-    webhook = args.webhook or cfg.get("webhook_url", "")
-    card = build_hook_payload(payload, cfg, stats, budget)
+    msg = build_hook_message(payload, cfg, stats, budget)
 
     if args.dry_run:
-        print(json.dumps(card, ensure_ascii=False, indent=2))
-        return 0
-
-    if not webhook:
-        log("未配置 webhook_url，跳过发送", True)
+        print(json.dumps(render(cfg, msg), ensure_ascii=False, indent=2))
         return 0
 
     # 网络超时取「配置值」与「剩余预算」的较小者，确保总耗时守在硬超时之内
     timeout = budget.slice(float(cfg.get("timeout", 5)))
-    sent, detail = post(webhook, card, cfg.get("secret", ""), timeout, allowed_hosts(cfg))
+    sent, detail = post(destination(cfg), render(cfg, msg), timeout, allowed_hosts(cfg))
     log("send %s: %s" % ("ok" if sent else "FAIL", detail), debug or not sent)
     return 0
 
@@ -1448,8 +1465,9 @@ def _run_hook(args, budget: Budget) -> int:
 def cmd_send(args) -> int:
     cfg = apply_cli_override(load_config(), args.webhook)
     status = (args.status or "info").lower()
-    icon, status_cn, default_color = STATUS_STYLES.get(status, STATUS_STYLES["info"])
-    color = args.color or default_color
+    if status not in SEND_STATUSES:
+        status = "info"
+    icon, status_cn = STATUSES[status]
 
     cwd = os.getcwd()
     git = git_info(cwd)
@@ -1466,15 +1484,16 @@ def cmd_send(args) -> int:
     session_name = args.session_name
     if not session_name and not args.no_session:
         _, session_name = session_context({"session_id": session_id})
-    fields = [field("项目", name), field("分支", git.get("branch") or "-"), field("主机", hostname())]
+    fields = [("项目", name), ("分支", git.get("branch") or "-"), ("主机", hostname())]
     if not args.no_session:
         fields.extend(session_fields(session_id))
     footer = "Claude Code · %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     subject = name if args.no_session else card_subject(session_name, name)
-    card = build_card("%s %s · %s" % (icon, title, subject), color, "\n".join(lines), fields, footer)
+    msg = Message(title="%s %s · %s" % (icon, title, subject), body="\n".join(lines),
+                  status=status, fields=fields, footer=footer, color=args.color)
 
     if args.dry_run:
-        print(json.dumps(card, ensure_ascii=False, indent=2))
+        print(json.dumps(render(cfg, msg), ensure_ascii=False, indent=2))
         return 0
 
     for warning in cfg.get("_warnings", []):
@@ -1483,15 +1502,16 @@ def cmd_send(args) -> int:
         print("错误：%s" % cfg["_fatal"], file=sys.stderr)
         return 2
 
-    webhook = args.webhook or cfg.get("webhook_url", "")
-    if not webhook:
-        print("错误：未找到 webhook_url。请先运行 doctor 查看配置来源，或设置 LARK_WEBHOOK_URL。", file=sys.stderr)
+    dest = destination(cfg)
+    ready, why, _, _ = prepare_request(dest, {}, allowed_hosts(cfg))
+    if not ready:
+        print("错误：%s。请先运行 doctor 查看配置来源。" % why, file=sys.stderr)
         return 2
 
-    ok, detail = post(webhook, card, cfg.get("secret", ""), float(cfg.get("timeout", 5)),
-                      allowed_hosts(cfg))
+    channel = active_channel(cfg)
+    ok, detail = post(dest, channel.render(msg), float(cfg.get("timeout", 5)), allowed_hosts(cfg))
     if ok:
-        print("已发送到飞书：%s" % title)
+        print("已发送到%s：%s" % (channel.label, title))
         return 0
     print("发送失败：%s" % detail, file=sys.stderr)
     return 1
@@ -1501,19 +1521,29 @@ def cmd_send(args) -> int:
 
 def cmd_doctor(args) -> int:
     cfg = apply_cli_override(load_config(), args.webhook)
-    webhook = args.webhook or cfg.get("webhook_url", "")
-    print("claude-hook-lark 配置检查")
+    channel = active_channel(cfg)
+    dest = destination(cfg)
+    print("claude-hook-notify 配置检查")
     print("  Python           : %s" % sys.version.split()[0])
     print("  配置来源         : %s" % cfg.get("_source", "(未找到配置文件)"))
     print("  用户级配置路径   : %s%s" % (CONFIG_PATH, "" if CONFIG_PATH.exists() else "  (不存在)"))
     if cfg.get("_project_source"):
         print("  项目级配置       : %s  (仅允许收窄行为，不能指定目的地)" % cfg["_project_source"])
-    print("  webhook_url      : %s" % mask(webhook))
-    valid, why = validate_webhook(webhook, allowed_hosts(cfg))
+    print("  通知渠道         : %s" % (
+        "%s (%s)" % (channel.name, channel.label) if channel else "✗ %r 不是已支持的渠道" % cfg.get("channel")))
+    if channel:
+        for key in channel.dest_keys:
+            # 凭据一律不回显；带 URL 的字段只显示协议和主机
+            if key in ("webhook_url", "server") and isinstance(cfg.get(key), str):
+                shown = mask(cfg[key])
+            else:
+                shown = "已配置" if cfg.get(key) else (
+                    "(未配置)" if key in channel.required else "未配置（可选）")
+            print("  %-16s : %s" % (key, shown))
+    valid, why, _, _ = prepare_request(dest, {}, allowed_hosts(cfg))
     print("  目的地校验       : %s" % ("通过" if valid else "✗ " + why))
     # allowed_hosts 永远非空（空列表会退回官方白名单），不存在「不限制」这一档
     print("  允许的主机       : %s" % ", ".join(allowed_hosts(cfg)))
-    print("  签名密钥         : %s" % ("已配置" if cfg.get("secret") else "未配置（机器人未开启签名校验时正常）"))
     events_now = effective_events(cfg)
     print("  监听事件         : %s%s" % (
         events_now, "  (为空：不会推送任何事件)" if not events_now else ""))
@@ -1528,27 +1558,22 @@ def cmd_doctor(args) -> int:
         print("\n✗ 配置不可用，通知已停发：%s" % cfg["_fatal"])
         return 2
 
-    if not valid and webhook:
-        print("\n✗ %s" % why)
-        return 2
-
-    if not webhook:
-        print("\n✗ 未配置 webhook_url。参考 README 的「配置」一节。")
+    if not valid:
+        print("\n✗ %s。参考 README 的「配置」一节。" % why)
         return 2
 
     if not args.test:
         print("\n✓ 配置看起来正常。加 --test 可发送一条测试消息。")
         return 0
 
-    card = build_card(
-        "🔔 claude-hook-lark 测试",
-        "blue",
-        "**配置测试成功**\n\n如果你在飞书里看到这条消息，说明 webhook 配置正确。",
-        [field("主机", hostname()), field("目录", os.path.basename(os.getcwd()))],
-        "Claude Code · %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    msg = Message(
+        title="🔔 claude-hook-notify 测试",
+        body="**配置测试成功**\n如果你收到这条消息，说明%s配置正确。" % channel.label,
+        status="running",
+        fields=[("主机", hostname()), ("目录", os.path.basename(os.getcwd()))],
+        footer="Claude Code · %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
-    ok, detail = post(webhook, card, cfg.get("secret", ""), float(cfg.get("timeout", 5)),
-                      allowed_hosts(cfg))
+    ok, detail = post(dest, channel.render(msg), float(cfg.get("timeout", 5)), allowed_hosts(cfg))
     print("\n%s %s" % ("✓ 测试消息已发送。" if ok else "✗ 发送失败：", "" if ok else detail))
     return 0 if ok else 1
 
@@ -1556,33 +1581,33 @@ def cmd_doctor(args) -> int:
 # ── 入口 ────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="lark_notify", description="Claude Code → 飞书/Lark 通知")
+    p = argparse.ArgumentParser(prog="notify", description="Claude Code → 飞书 / 企业微信 / 钉钉 / Slack / Telegram / Bark 通知")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     h = sub.add_parser("hook", help="从 stdin 读取 Claude Code hook 事件并推送")
-    h.add_argument("--webhook", default="", help="覆盖配置中的 webhook URL")
-    h.add_argument("--dry-run", action="store_true", help="只打印卡片 JSON，不实际发送")
+    h.add_argument("--webhook", default="", help="覆盖当前渠道的 webhook URL")
+    h.add_argument("--dry-run", action="store_true", help="只打印当前渠道的请求体 JSON，不实际发送")
     h.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("send", help="手动发送一条通知")
     s.add_argument("-t", "--title", default="", help="标题")
     s.add_argument("-s", "--status", default="info",
-                   choices=sorted(STATUS_STYLES), help="状态，决定图标与默认颜色")
+                   choices=SEND_STATUSES, help="状态，决定图标与默认颜色")
     s.add_argument("-m", "--message", default="", help="正文")
     s.add_argument("-d", "--detail", default="", help="补充详情，显示在分隔线下方")
-    s.add_argument("-c", "--color", default="", help="强制指定卡片颜色，如 green/red/orange")
+    s.add_argument("-c", "--color", default="", help="强制指定卡片颜色（仅飞书生效），如 green/red/orange")
     s.add_argument("--session-id", default="", dest="session_id",
                    help="会话 ID，默认取环境变量 CLAUDE_CODE_SESSION_ID")
     s.add_argument("--session-name", default="", dest="session_name",
                    help="会话名，默认从 transcript 的 ai-title 记录读取")
     s.add_argument("--no-session", action="store_true",
-                   help="不在卡片里附带会话名和会话 ID")
-    s.add_argument("--webhook", default="", help="覆盖配置中的 webhook URL")
-    s.add_argument("--dry-run", action="store_true", help="只打印卡片 JSON，不实际发送")
+                   help="不在通知里附带会话名和会话 ID")
+    s.add_argument("--webhook", default="", help="覆盖当前渠道的 webhook URL")
+    s.add_argument("--dry-run", action="store_true", help="只打印当前渠道的请求体 JSON，不实际发送")
     s.set_defaults(func=cmd_send)
 
     d = sub.add_parser("doctor", help="检查配置")
-    d.add_argument("--webhook", default="", help="覆盖配置中的 webhook URL")
+    d.add_argument("--webhook", default="", help="覆盖当前渠道的 webhook URL")
     d.add_argument("--test", action="store_true", help="发送一条测试消息")
     d.set_defaults(func=cmd_doctor)
     return p
