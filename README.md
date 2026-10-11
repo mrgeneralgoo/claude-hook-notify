@@ -299,7 +299,7 @@ python3 -m unittest discover -s tests -v
 
 不需要任何依赖。其中两个端到端用例会真的等待数秒来验证看门狗，整轮约 15 秒。
 
-Python 3.9+。
+Python 3.9+，只用标准库。支持 macOS 与 Linux，暂不支持 Windows。
 
 欢迎提 Issue 和 PR。改动请附带对应的回归用例 —— 这个项目的绝大多数分支都是某个具体失败场景的产物，
 `docs/DESIGN.md` 记录了它们各自的来由。
