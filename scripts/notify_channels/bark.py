@@ -1,23 +1,47 @@
 # -*- coding: utf-8 -*-
 """Bark（iOS 推送）。走 POST /push，device_key 放在 JSON 里而不是 URL 路径里。
 
-正文走 Bark 的 markdown 参数（App 端渲染粗体、代码块、标题、列表等，传了它 body 会被忽略），
-字段放进 subtitle 显示在标题下方，脚注作为正文最后一行。单个换行转成硬换行，免得被合并成一段。
-APNs 负载上限 4KB，所以正文同时按字符数和 UTF-8 字节数截断。自建服务用 server 指定地址，
-并需要在用户配置的 allowed_hosts 里放行该主机。
+正文走 Bark 的 markdown 参数（App 端渲染粗体、代码块、标题、列表等，传了它 body 会被忽略）。
+前两个字段（项目、分支）放进 subtitle，一行看完；其余字段和脚注放进正文末尾的引用块，
+App 里显示为浅灰色，不和正文抢视线。
+
+Bark 的渲染器会把标题、列表行尾的硬换行再算成一个空行，所以只在「文字行后面紧跟文字行」
+时补硬换行。APNs 负载上限 4KB，所以正文同时按字符数和 UTF-8 字节数截断。
+自建服务用 server 指定地址，并需要在用户配置的 allowed_hosts 里放行该主机。
 """
 
 from __future__ import annotations
 
 import re
 
-from .base import Channel, Message, check_code, md_to_plain, truncate, truncate_md
-from .dingtalk import hard_breaks
+from .base import Channel, Message, _is_fence, check_code, md_to_plain, truncate, truncate_md
 
 DEFAULT_SERVER = "https://api.day.app"
 MAX_BODY = 1000
 MAX_BODY_BYTES = 2800    # 给标题、副标题和 APNs 外壳留出余量，整体不超过 4KB
+SUBTITLE_FIELDS = 2
 _KEY_RE = re.compile(r"[A-Za-z0-9]+")
+_BLOCK_RE = re.compile(r"\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|>)")
+
+
+def _is_text(line: str) -> bool:
+    return bool(line.strip()) and not _is_fence(line) and not _BLOCK_RE.match(line)
+
+
+def soft_breaks(text: str) -> str:
+    """文字行后面紧跟文字行（或引用行紧跟引用行）时补硬换行；标题、列表、代码块原样不动。"""
+    lines = text.split("\n")
+    out = []
+    in_fence = False
+    for i, line in enumerate(lines):
+        if _is_fence(line):
+            in_fence = not in_fence
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        quote = line.startswith(">") and nxt.startswith(">")
+        if not in_fence and ((_is_text(line) and _is_text(nxt)) or quote):
+            line = line.rstrip() + "  "
+        out.append(line)
+    return "\n".join(out)
 
 
 def fit_markdown(text: str, limit: int, max_bytes: int) -> str:
@@ -29,6 +53,10 @@ def fit_markdown(text: str, limit: int, max_bytes: int) -> str:
     return out
 
 
+def _field(k: str, v: str) -> str:
+    return "%s: %s" % (md_to_plain(k), md_to_plain(v))
+
+
 class BarkChannel(Channel):
     name = "bark"
     label = "Bark"
@@ -38,13 +66,15 @@ class BarkChannel(Channel):
 
     def render(self, msg: Message) -> dict:
         title = truncate(md_to_plain(msg.title), 200).replace("\n", " ")
-        subtitle = truncate(" · ".join("%s: %s" % (md_to_plain(k), md_to_plain(v))
-                                       for k, v in msg.fields), 150).replace("\n", " ")
-        foot = truncate(md_to_plain(msg.footer), 100)
-        body = hard_breaks(msg.body.strip()) if msg.body.strip() else ""
-        body = fit_markdown(body, max(MAX_BODY - len(foot) - 2, 0),
-                            max(MAX_BODY_BYTES - len(foot.encode("utf-8")) - 2, 0))
-        out = {"title": title, "markdown": "\n\n".join(p for p in (body, foot) if p),
+        head, rest = msg.fields[:SUBTITLE_FIELDS], msg.fields[SUBTITLE_FIELDS:]
+        subtitle = truncate(" · ".join(_field(k, v) for k, v in head), 100).replace("\n", " ")
+        meta = [truncate(" · ".join(_field(k, v) for k, v in rest), 200)] if rest else []
+        if msg.footer:
+            meta.append(truncate(md_to_plain(msg.footer), 100))
+        tail = soft_breaks("\n".join("> " + m.replace("\n", " ") for m in meta))
+        body = fit_markdown(soft_breaks(msg.body.strip()), max(MAX_BODY - len(tail) - 2, 0),
+                            max(MAX_BODY_BYTES - len(tail.encode("utf-8")) - 2, 0))
+        out = {"title": title, "markdown": "\n\n".join(p for p in (body, tail) if p),
                "group": "Claude Code"}
         if subtitle:
             out["subtitle"] = subtitle

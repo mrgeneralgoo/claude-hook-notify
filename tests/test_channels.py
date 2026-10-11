@@ -284,9 +284,15 @@ class TestBark(unittest.TestCase):
     def test_markdown_and_subtitle(self):
         out = bark.CHANNEL.render(sample_message(body="**粗体**\n第二行\n```\ncode\n```"))
         self.assertNotIn("body", out)                       # 传了 markdown，body 会被 Bark 忽略
-        self.assertIn("**粗体**  \n第二行  \n```\ncode\n```", out["markdown"])
-        self.assertTrue(out["markdown"].endswith("Claude Code · 2026-01-02 03:04:05"))
-        self.assertEqual(out["subtitle"], "项目: alpha · 分支: feature/x · 主机: mac-mini")
+        self.assertIn("**粗体**  \n第二行\n```\ncode\n```", out["markdown"])
+        # 前两个字段进副标题，其余字段和脚注进末尾的灰色引用块
+        self.assertEqual(out["subtitle"], "项目: alpha · 分支: feature/x")
+        self.assertTrue(out["markdown"].endswith(
+            "\n\n> 主机: mac-mini  \n> Claude Code · 2026-01-02 03:04:05"))
+
+    def test_hard_breaks_only_between_text_lines(self):
+        src = "## 标题\n- a\n- b\n文字一\n文字二\n> 引用"
+        self.assertEqual(bark.soft_breaks(src), "## 标题\n- a\n- b\n文字一  \n文字二\n> 引用")
 
     def test_no_fields_no_subtitle(self):
         self.assertNotIn("subtitle", bark.CHANNEL.render(Message(title="t", body="b")))
