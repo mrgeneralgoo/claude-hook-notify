@@ -2516,6 +2516,89 @@ class TestCardTitleUsesSessionName(unittest.TestCase):
         self.assertNotIn("会话 ID", json.dumps(card, ensure_ascii=False))
 
 
+class TestRenameCompat(ConfigSandbox):
+    """改名为 claude-hook-notify 后，旧的路径、环境变量和键名必须继续生效。
+
+    其余用例大量使用旧名（.claude/lark.json、CLAUDE_HOOK_LARK_CONFIG），
+    本身就覆盖了旧名；这里补新名以及新旧并存时的取舍。
+    """
+
+    def write_notify_project(self, data):
+        (self.project / ".claude" / "notify.json").write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def test_legacy_user_config_used_when_new_missing(self):
+        ln.LEGACY_CONFIG_PATH.write_text(json.dumps({"webhook_url": SAFE_URL}), encoding="utf-8")
+        cfg = ln.load_config(str(self.project))
+        self.assertEqual(cfg.get("webhook_url"), SAFE_URL)
+        self.assertTrue(any("旧版配置" in w for w in cfg["_warnings"]))
+
+    def test_new_user_config_wins_over_legacy(self):
+        ln.LEGACY_CONFIG_PATH.write_text(json.dumps({"webhook_url": SAFE_URL + "-old"}),
+                                         encoding="utf-8")
+        self.write_user({"webhook_url": SAFE_URL + "-new"})
+        self.assertEqual(ln.load_config(str(self.project)).get("webhook_url"), SAFE_URL + "-new")
+
+    def test_new_explicit_env_wins_over_legacy_env(self):
+        new = Path(self.tmp) / "new.json"
+        old = Path(self.tmp) / "old.json"
+        new.write_text(json.dumps({"webhook_url": SAFE_URL + "-new"}), encoding="utf-8")
+        old.write_text(json.dumps({"webhook_url": SAFE_URL + "-old"}), encoding="utf-8")
+        os.environ["CLAUDE_HOOK_NOTIFY_CONFIG"] = str(new)
+        os.environ["CLAUDE_HOOK_LARK_CONFIG"] = str(old)
+        self.addCleanup(os.environ.pop, "CLAUDE_HOOK_NOTIFY_CONFIG", None)
+        self.addCleanup(os.environ.pop, "CLAUDE_HOOK_LARK_CONFIG", None)
+        self.assertEqual(ln.load_config(str(self.project)).get("webhook_url"), SAFE_URL + "-new")
+
+    def test_notify_json_takes_precedence_over_lark_json(self):
+        self.write_user({"webhook_url": SAFE_URL})
+        self.write_project({"events": ["Stop"]})
+        self.write_notify_project({"events": ["Notification"]})
+        cfg = ln.load_config(str(self.project))
+        self.assertEqual(ln.effective_events(cfg), ["Notification"])
+        self.assertTrue(cfg["_project_source"].endswith("notify.json"))
+
+    def test_new_selector_and_registry_names(self):
+        self.write_user({"webhook_url": SAFE_URL,
+                         "destinations": {"群": {"webhook_url": SAFE_URL + "-named", "secret": "s"}}})
+        self.write_notify_project({"destination": "群"})
+        cfg = ln.load_config(str(self.project))
+        self.assertEqual(cfg.get("webhook_url"), SAFE_URL + "-named")
+        self.assertEqual(cfg.get("secret"), "s")
+        self.assertEqual(cfg.get("channel"), "lark")
+
+    def test_project_cannot_set_channel(self):
+        self.write_user({"webhook_url": SAFE_URL})
+        self.write_notify_project({"channel": "slack"})
+        cfg = ln.load_config(str(self.project))
+        self.assertNotIn("channel", cfg)
+        self.assertEqual(ln.destination(cfg)["channel"], "lark")
+        self.assertTrue(any("channel" in w for w in cfg["_warnings"]))
+
+    def test_unknown_channel_is_fatal_and_not_revived_by_cli(self):
+        self.write_user({"channel": "pigeon", "webhook_url": SAFE_URL})
+        cfg = ln.load_config(str(self.project))
+        self.assertIn("pigeon", cfg.get("_fatal", ""))
+        self.assertIn("_fatal", ln.apply_cli_override(cfg, SAFE_URL))
+
+    def test_lark_env_replaces_other_channel_destination(self):
+        """LARK_WEBHOOK_URL 描述的是飞书目的地，必须连同渠道一起替换，不能把飞书地址配上别的渠道。"""
+        self.write_user({"channel": "lark", "webhook_url": SAFE_URL + "-user", "secret": "user"})
+        os.environ["LARK_WEBHOOK_URL"] = SAFE_URL + "-env"
+        self.addCleanup(os.environ.pop, "LARK_WEBHOOK_URL", None)
+        cfg = ln.load_config(str(self.project))
+        self.assertEqual(ln.destination(cfg),
+                         {"channel": "lark", "webhook_url": SAFE_URL + "-env", "secret": ""})
+
+    def test_hook_message_is_channel_neutral(self):
+        msg = ln.build_hook_message(
+            {"hook_event_name": "Stop", "cwd": os.getcwd(), "transcript_path": "/nope"}, {})
+        self.assertIsInstance(msg, ln.Message)
+        self.assertEqual(msg.status, "success")
+        self.assertEqual(msg.color, "", "hook 不应指定任何渠道私有的颜色")
+        self.assertTrue(all(isinstance(f, tuple) and len(f) == 2 for f in msg.fields))
+
+
 class TestVersionMetadata(unittest.TestCase):
     """版本号写在两个文件里，改一个忘一个是很容易犯的错。"""
 

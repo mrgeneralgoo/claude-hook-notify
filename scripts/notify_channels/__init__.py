@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
-from . import lark
+from . import bark, dingtalk, lark, slack, telegram, wecom
 from .base import Channel, Message, STATUSES, SEND_STATUSES  # noqa: F401
 
 DEFAULT_CHANNEL = "lark"
 
 CHANNELS: dict[str, Channel] = {c.name: c for c in (
     lark.CHANNEL,
+    wecom.CHANNEL,
+    dingtalk.CHANNEL,
+    slack.CHANNEL,
+    telegram.CHANNEL,
+    bark.CHANNEL,
 )}
 
 

@@ -468,7 +468,7 @@ def validate_config(cfg: dict, warnings: list) -> None:
     # —— 隐私开关：非 boolean 一律按 false ——
     if "include_summary" in cfg and not isinstance(cfg["include_summary"], bool):
         warnings.append(
-            "include_summary 必须是 true 或 false（当前是 %s），已按 false 处理，卡片不含会话摘要。"
+            "include_summary 必须是 true 或 false（当前是 %s），已按 false 处理，通知不含会话摘要。"
             % _type_name(cfg["include_summary"]))
         cfg["include_summary"] = False
 
@@ -656,7 +656,7 @@ def validate_webhook(url: str, hosts: tuple = DEFAULT_ALLOWED_HOSTS) -> tuple[bo
 
 
 def mask(url: str) -> str:
-    """脱敏展示。飞书 webhook 的 token 在路径末段，只保留固定前缀。"""
+    """脱敏展示。token 常在路径或查询串里，只保留协议和主机。"""
     if not url:
         return "(未配置)"
     try:
@@ -1601,7 +1601,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--session-name", default="", dest="session_name",
                    help="会话名，默认从 transcript 的 ai-title 记录读取")
     s.add_argument("--no-session", action="store_true",
-                   help="不在卡片里附带会话名和会话 ID")
+                   help="不在通知里附带会话名和会话 ID")
     s.add_argument("--webhook", default="", help="覆盖当前渠道的 webhook URL")
     s.add_argument("--dry-run", action="store_true", help="只打印当前渠道的请求体 JSON，不实际发送")
     s.set_defaults(func=cmd_send)

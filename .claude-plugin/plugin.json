@@ -1,23 +1,30 @@
 {
-  "name": "claude-hook-lark",
-  "description": "把 Claude Code 的任务完成 / 需要授权等事件推送到飞书(Lark)，并提供可手动调用的通知 skill。纯 Python 标准库，无第三方依赖。",
-  "version": "0.2.0",
+  "name": "claude-hook-notify",
+  "description": "把 Claude Code 的任务完成 / 需要授权等事件推送到飞书、企业微信、钉钉、Slack、Telegram、Bark，并提供可手动调用的通知 skill。换渠道只改配置，通知内容不变。纯 Python 标准库，无第三方依赖。",
+  "version": "0.3.0",
   "author": {
     "name": "mrgeneralgoo"
   },
-  "homepage": "https://github.com/mrgeneralgoo/claude-hook-lark",
-  "repository": "https://github.com/mrgeneralgoo/claude-hook-lark",
+  "homepage": "https://github.com/mrgeneralgoo/claude-hook-notify",
+  "repository": "https://github.com/mrgeneralgoo/claude-hook-notify",
   "license": "MIT",
   "keywords": [
+    "notification",
+    "hooks",
+    "webhook",
     "lark",
     "feishu",
     "飞书",
-    "notification",
-    "hooks",
-    "webhook"
+    "wecom",
+    "企业微信",
+    "dingtalk",
+    "钉钉",
+    "slack",
+    "telegram",
+    "bark"
   ],
   "skills": [
-    "./skills/lark-notify"
+    "./skills/notify"
   ],
   "hooks": {
     "Stop": [
@@ -26,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lark_notify.py\" hook",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/notify.py\" hook",
             "timeout": 15
           }
         ]
@@ -38,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lark_notify.py\" hook",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/notify.py\" hook",
             "timeout": 15
           }
         ]
@@ -50,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lark_notify.py\" hook",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/notify.py\" hook",
             "timeout": 15
           }
         ]
@@ -62,7 +69,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/lark_notify.py\" hook",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/notify.py\" hook",
             "timeout": 15
           }
         ]

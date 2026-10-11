@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 # 状态 → (图标, 中文)。颜色等视觉映射属于各渠道自己的事。
@@ -117,3 +118,90 @@ def truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+# ── 渠道共用的纯文本 / markdown 转换（只追加，不改上面的定义） ────────────────
+
+_FENCE = "```"
+_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
+
+
+def _is_fence(line: str) -> bool:
+    return line.lstrip().startswith(_FENCE)
+
+
+def truncate_bytes(text: str, limit: int) -> str:
+    """按 UTF-8 字节数截断，不会切坏多字节字符；超长时以 … 结尾（结果 ≤ limit 字节）。"""
+    text = (text or "").strip()
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    cut = raw[: max(limit - 3, 0)].decode("utf-8", "ignore").rstrip()
+    return cut + "…"
+
+
+def truncate_md(text: str, limit: int) -> str:
+    """按字符数截断 markdown；若截断后留下未闭合的代码块，补一个收尾围栏。"""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = truncate(text, limit - 5)
+    if sum(1 for ln in cut.split("\n") if _is_fence(ln)) % 2:
+        cut += "\n" + _FENCE
+    return cut
+
+
+def md_to_plain(text: str) -> str:
+    """通用 markdown → 可读纯文本：去掉 ** 与标题 #，保留代码内容，链接写成「文字 (地址)」。"""
+    out = []
+    in_fence = False
+    for line in (text or "").split("\n"):
+        if _is_fence(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            m = _HEADING_RE.match(line)
+            if m:
+                line = m.group(1)
+            line = _LINK_RE.sub(lambda mm: "%s (%s)" % (mm.group(1), mm.group(2)), line)
+            line = _BOLD_RE.sub(r"\1", line)
+            line = line.replace("`", "")
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def md_to_slack(text: str) -> str:
+    """通用 markdown → Slack mrkdwn。
+
+    先转义 & < >（Slack 要求），再生成 <url|文字> 链接，所以生成的尖括号不会被转义。
+    引用行的前导 > 要保留原样，Slack 才认作引用。代码块内只转义，不做其它转换。
+    """
+    def esc(s: str) -> str:
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    out = []
+    in_fence = False
+    for line in (text or "").split("\n"):
+        if _is_fence(line):
+            in_fence = not in_fence
+            out.append(_FENCE)
+            continue
+        if in_fence:
+            out.append(esc(line))
+            continue
+        quote = ""
+        if line.startswith(">"):
+            quote, line = "> ", line[1:].lstrip()
+        m = _HEADING_RE.match(line)
+        heading = m is not None
+        if heading:
+            line = _BOLD_RE.sub(r"\1", m.group(1))
+        line = esc(line)
+        line = _LINK_RE.sub(lambda mm: "<%s|%s>" % (mm.group(2), mm.group(1)), line)
+        line = _BOLD_RE.sub(r"*\1*", line)
+        if heading and line:
+            line = "*%s*" % line
+        out.append(quote + line)
+    return "\n".join(out).strip()

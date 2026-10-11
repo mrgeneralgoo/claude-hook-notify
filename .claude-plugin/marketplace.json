@@ -1,19 +1,19 @@
 {
-  "name": "claude-hook-lark",
+  "name": "claude-hook-notify",
   "owner": {
     "name": "mrgeneralgoo",
     "url": "https://github.com/mrgeneralgoo"
   },
   "metadata": {
-    "description": "Claude Code → 飞书 / Lark 通知插件",
-    "version": "0.2.0"
+    "description": "Claude Code 多渠道通知插件：飞书 / 企业微信 / 钉钉 / Slack / Telegram / Bark",
+    "version": "0.3.0"
   },
   "plugins": [
     {
-      "name": "claude-hook-lark",
+      "name": "claude-hook-notify",
       "source": "./",
       "category": "productivity",
-      "description": "任务完成时自动推送飞书卡片，并提供手动发送通知的 skill。"
+      "description": "任务完成时自动推送通知到你选择的渠道，并提供手动发送通知的 skill。"
     }
   ]
 }

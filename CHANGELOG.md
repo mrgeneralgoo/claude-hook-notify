@@ -2,6 +2,42 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0]
+
+项目从「飞书通知插件」升级为通用的多渠道通知插件，并改名为 **claude-hook-notify**。
+
+### 新增
+
+- **渠道契约**（`scripts/notify_channels/`）。通知内容统一成与渠道无关的 `Message`，
+  各渠道只负责 `render`（排版）、`request`（拼 URL、签名）、`check`（判成败），
+  HTTP 发送、超时和错误脱敏由框架统一处理。新增渠道只需写一个模块并登记。
+- **五个新渠道**：企业微信、钉钉（含加签）、Slack、Telegram、Bark。配置里写
+  `"channel": "<名字>"` 加该渠道的字段即可切换，通知内容不变。
+- 具名目的地 `destinations` / 选择器 `destination`，每项可以是不同渠道。
+- `doctor` 显示当前渠道及其字段状态（凭据不回显）。
+
+### 变更（改名）
+
+- 插件 / marketplace 名 `claude-hook-lark` → `claude-hook-notify`，需要重新安装。
+- 脚本 `scripts/lark_notify.py` → `scripts/notify.py`；skill `lark-notify` → `notify`。
+- 用户配置 `~/.config/claude-hook-notify/config.json`、环境变量 `CLAUDE_HOOK_NOTIFY_CONFIG`、
+  项目配置 `.claude/notify.json`。**旧路径、旧环境变量、旧键名（`webhooks` / `webhook`）都继续生效**，
+  没有 `channel` 键的配置按飞书处理。
+- 事件样式改为返回状态而非飞书颜色，颜色映射移入飞书渠道；飞书卡片外观不变。
+- `send -c` 仅对飞书生效。
+
+### 安全
+
+- 信任边界随渠道扩展：所有渠道的凭据字段与 `channel` 都只能来自用户配置或环境变量，
+  项目配置写了会被忽略并告警。字段名单由已注册渠道自动求并集。
+- 未知渠道名直接停发，不退回飞书。
+- 会拼进 URL 的凭据（Telegram `bot_token` / `chat_id`、Bark `device_key`）按格式校验，防止路径注入。
+
+### 测试
+
+236 → 301。新增用例覆盖：同一条 `Message` 经每个渠道渲染后内容完整、超长正文不超出各平台上限、
+各渠道签名与 URL 拼装、响应判定不回显远端文本、项目配置不能指定渠道或令牌、未知渠道停发。
+
 ## [0.2.0]
 
 卡片排版的三处修复，均来自实际使用中的反馈。
