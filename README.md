@@ -41,7 +41,7 @@ Example (Feishu card; other channels carry the same content in their own format)
 
 ```
 ┌────────────────────────────────────────────┐
-│ ✅ Task complete · Refactor login module    │  ← title is the session name
+│ ✅ Task complete · Refactor login module   │  ← title is the session name
 ├────────────────────────────────────────────┤
 │ Claude Code finished this turn             │
 │ 📋 Task                                    │
@@ -50,7 +50,7 @@ Example (Feishu card; other channels carry the same content in their own format)
 │ ## What changed                            │
 │ - Issue JWTs on login                      │
 │ - Added 12 tests                           │
-│ 🔧 19 tool calls · ⏱️ 6 min 31 s            │
+│ 🔧 19 tool calls · ⏱️ 6 min 31 s          │
 ├────────────────────────────────────────────┤
 │ Project my-project     Branch feat/jwt     │
 │ Host dev-macbook       Session 3f2a9c10-…  │
