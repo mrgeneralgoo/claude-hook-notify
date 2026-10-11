@@ -135,7 +135,6 @@ class TestHugeBody(unittest.TestCase):
         self.assertLessEqual(len(telegram.CHANNEL.render(msg)["text"]), 4096)
         b = bark.CHANNEL.render(msg)
         self.assertLessEqual(len(b["markdown"]), 1000)
-        self.assertLessEqual(len(b["subtitle"]), 150)
         self.assertLess(len(json.dumps(b, ensure_ascii=False).encode()), 3800)
         blocks = slack.CHANNEL.render(msg)["blocks"]
         self.assertLessEqual(len(blocks[0]["text"]["text"]), 150)
@@ -281,21 +280,22 @@ class TestBark(unittest.TestCase):
     def test_group_in_render(self):
         self.assertEqual(bark.CHANNEL.render(sample_message())["group"], "Claude Code")
 
-    def test_markdown_and_subtitle(self):
+    def test_markdown_with_fields_in_quote(self):
         out = bark.CHANNEL.render(sample_message(body="**粗体**\n第二行\n```\ncode\n```"))
         self.assertNotIn("body", out)                       # 传了 markdown，body 会被 Bark 忽略
+        self.assertNotIn("subtitle", out)
         self.assertIn("**粗体**  \n第二行\n```\ncode\n```", out["markdown"])
-        # 前两个字段进副标题，其余字段和脚注进末尾的灰色引用块
-        self.assertEqual(out["subtitle"], "项目: alpha · 分支: feature/x")
+        # 字段每行两个，和脚注一起进末尾的灰色引用块
         self.assertTrue(out["markdown"].endswith(
-            "\n\n> 主机: mac-mini  \n> Claude Code · 2026-01-02 03:04:05"))
+            "\n\n> 项目: alpha · 分支: feature/x  \n> 主机: mac-mini  \n"
+            "> Claude Code · 2026-01-02 03:04:05"))
 
     def test_hard_breaks_only_between_text_lines(self):
         src = "## 标题\n- a\n- b\n文字一\n文字二\n> 引用"
         self.assertEqual(bark.soft_breaks(src), "## 标题\n- a\n- b\n文字一  \n文字二\n> 引用")
 
-    def test_no_fields_no_subtitle(self):
-        self.assertNotIn("subtitle", bark.CHANNEL.render(Message(title="t", body="b")))
+    def test_no_fields_no_quote(self):
+        self.assertEqual(bark.CHANNEL.render(Message(title="t", body="b"))["markdown"], "b")
 
     def test_multibyte_body_capped_by_bytes(self):
         out = bark.CHANNEL.render(sample_message(body="😀" * 2000))

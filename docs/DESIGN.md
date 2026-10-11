@@ -37,7 +37,7 @@ hook / send / doctor ──► Message ──► Channel.render ──► Channe
 | 钉钉 | markdown | 单个换行不换行，渠道内把它转成 `  \n`（代码块内除外） |
 | Slack | Block Kit | `**粗体**` 要转成 `*粗体*`，`<`、`>`、`&` 必须转义 |
 | Telegram | 纯文本 | MarkdownV2 / HTML 都要求严格转义，Claude 回复里一个没转义的字符就会让整条消息被拒 |
-| Bark | 系统推送（markdown + subtitle） | 正文走 `markdown` 参数由 App 渲染，字段放 `subtitle`；APNs 负载 4KB，正文按字节截断 |
+| Bark | 系统推送（markdown） | 正文走 `markdown` 参数由 App 渲染，字段和脚注放进末尾的引用块（显示为浅灰色）；APNs 负载 4KB，正文按字节截断 |
 
 每个渠道都按平台文档的长度上限截断，超长回复不会导致请求被拒。
 
