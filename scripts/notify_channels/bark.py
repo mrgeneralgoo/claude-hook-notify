@@ -8,6 +8,7 @@
 Bark 的渲染器会把标题、列表行尾的硬换行再算成一个空行，所以只在「文字行后面紧跟文字行」
 时补硬换行。APNs 负载上限 4KB，所以正文同时按字符数和 UTF-8 字节数截断。
 自建服务用 server 指定地址，并需要在用户配置的 allowed_hosts 里放行该主机。
+icon 是可选的通知图标地址，由 App 下载（iOS 15+），不经过本插件，所以不受 allowed_hosts 限制。
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ MAX_BODY_BYTES = 2800    # 给标题、副标题和 APNs 外壳留出余量，�
 MAX_TAIL = 400           # 末尾引用块（字段 + 脚注）的上限，正文至少留 600 字
 FIELDS_PER_LINE = 2
 _KEY_RE = re.compile(r"[A-Za-z0-9]+")
+_ICON_RE = re.compile(r"https?://\S+")
 _BLOCK_RE = re.compile(r"\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|>)")
 
 
@@ -63,7 +65,7 @@ class BarkChannel(Channel):
     label = "Bark"
     default_hosts = ("api.day.app",)
     required = ("device_key",)
-    optional = ("server",)
+    optional = ("server", "icon")
 
     def render(self, msg: Message) -> dict:
         title = truncate(md_to_plain(msg.title), 200).replace("\n", " ")
@@ -84,6 +86,11 @@ class BarkChannel(Channel):
         server = dest.get("server") or DEFAULT_SERVER
         body = dict(body)
         body["device_key"] = key
+        icon = dest.get("icon")
+        if icon:
+            if not isinstance(icon, str) or not _ICON_RE.fullmatch(icon):
+                raise ValueError("icon 必须是 http(s) 图片地址")
+            body["icon"] = icon
         return server.rstrip("/") + "/push", body
 
     def check(self, status, parsed, raw):
