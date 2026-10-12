@@ -217,8 +217,8 @@ python3 scripts/notify.py send -t "预览" -s info -m "hello" --dry-run
 
 | 事件 | 触发时机 | 通知 | 默认开启 |
 |------|----------|------|:--------:|
-| `Stop` | Claude 完成一轮任务 | ✅ 任务完成 | ✔ |
-| `Notification` | 需要授权，或等待输入超时 | 🔐 需要授权 · ⏳ 等待输入 | ✔ |
+| `Stop` | Claude 完成一轮任务 | ✅ 任务完成 · ⏳ 后台运行中（列出仍在跑的后台任务） | ✔ |
+| `Notification` | 需要授权、MCP 在等你回答，或空闲 60 秒（订阅了 `Stop` 时不推送空闲提醒） | 🔐 需要授权 · 🙋 需要你回答 · ⏳ 等待输入 | ✔ |
 | `SubagentStop` | 子任务（subagent）结束 | 📦 子任务完成 | |
 | `SessionEnd` | 会话退出 | 👋 会话结束 | |
 

@@ -2,6 +2,22 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2]
+
+### 修复
+
+- **后台任务还在跑时不再报「任务完成」**。Stop 读取 Claude Code 提供的 `background_tasks`，
+  有在途任务时推送「⏳ 后台运行中」并列出任务描述（不外发 `command`）；任务结束、Claude 被唤醒
+  收尾后，会再推一条「✅ 任务完成」。旧版 Claude Code 没有该字段时行为不变。
+- **Notification 按 `notification_type` 区分**：`permission_prompt` →「🔐 需要授权」；
+  `elicitation_dialog` / `elicitation_url_dialog` →「🙋 需要你回答」。字段缺失时才退回按文本判断。
+
+### 行为变更
+
+- 订阅了 Stop 时，不再推送 `idle_prompt`（「回复完 60 秒没人输入」的计时提醒）。它在后台任务运行期间
+  也会触发，和 Stop 通知重复且容易误导。只订阅 Notification 时照常推送。
+- `auth_success`、`elicitation_complete`、`elicitation_response` 不需要用户操作，不再推送。
+
 ## [0.3.1]
 
 ### 变更
