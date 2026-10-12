@@ -61,7 +61,7 @@ class TestRegistry(unittest.TestCase):
             self.assertTrue(ch.required)
 
     def test_new_credentials_are_protected_destination_keys(self):
-        for key in ("bot_token", "chat_id", "device_key", "server", "secret", "webhook_url"):
+        for key in ("bot_token", "chat_id", "device_key", "server", "secret", "webhook_url", "icon"):
             self.assertIn(key, ln.DESTINATION_KEYS)
 
 
@@ -315,6 +315,16 @@ class TestBark(unittest.TestCase):
         for key in ("a/b", "a b", "abc\n", "a?b", "../x", "ab-cd"):
             with self.assertRaises(ValueError, msg=key):
                 bark.CHANNEL.request(dict(DESTS["bark"], device_key=key), {})
+
+    def test_icon(self):
+        _, body = bark.CHANNEL.request(DESTS["bark"], {})
+        self.assertNotIn("icon", body)                          # 不配置就不带
+        url = "https://cdn.example.com/claude.png"
+        _, body = bark.CHANNEL.request(dict(DESTS["bark"], icon=url), {})
+        self.assertEqual(body["icon"], url)
+        for bad in ("claude.png", "javascript:x", "https://a b", 123, ["https://x"]):
+            with self.assertRaises(ValueError, msg=bad):
+                bark.CHANNEL.request(dict(DESTS["bark"], icon=bad), {})
 
 
 class TestDefaultHosts(unittest.TestCase):
