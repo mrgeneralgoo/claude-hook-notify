@@ -1218,16 +1218,48 @@ def in_quiet_hours(quiet, now_hour: int | None = None) -> bool:
 
 # ── hook 模式 ───────────────────────────────────────────────────────
 
+# Stop 输入里的 background_tasks 只列在途任务，实测状态为 running。只认这两个值：
+# 遇到不认识的状态时退回「任务完成」，宁可少报「仍在运行」，也不让人干等。
+PENDING_TASK_STATUSES = ("running", "pending")
+TASK_ICONS = {"shell": "🐚", "agent": "🤖"}
+MAX_LISTED_TASKS = 5
+
+# 这些 Notification 不需要用户做任何事（认证成功、表单已提交等），不推送。
+SILENT_NOTIFICATION_TYPES = ("auth_success", "elicitation_complete", "elicitation_response")
+
+
+def pending_background_tasks(payload: dict) -> list[dict]:
+    """Stop 时仍在运行的后台任务（后台 Bash、异步 subagent 等）。字段缺失（旧版 Claude Code）时为空。"""
+    tasks = payload.get("background_tasks")
+    if not isinstance(tasks, list):
+        return []
+    return [t for t in tasks if isinstance(t, dict) and t.get("status") in PENDING_TASK_STATUSES]
+
+
+def notification_type(payload: dict) -> str:
+    value = payload.get("notification_type")
+    return value if isinstance(value, str) else ""
+
+
 def event_style(event_name: str, payload: dict) -> tuple[str, str, str]:
     """返回 (标题前缀, 状态, 正文标题)。状态如何上色由各渠道自己决定。"""
     if event_name == "Stop":
+        pending = pending_background_tasks(payload)
+        if pending:
+            return ("⏳ 后台运行中", "running",
+                    "**本轮已结束，%d 个后台任务仍在运行，完成后 Claude 会继续**" % len(pending))
         return "✅ 任务完成", "success", "**Claude Code 已完成本轮任务**"
     if event_name == "SubagentStop":
         return "📦 子任务完成", "subtask", "**子任务执行完成**"
     if event_name == "Notification":
+        ntype = notification_type(payload)
         message = (payload.get("message") or "").strip()
-        if "permission" in message.lower() or "授权" in message:
+        # notification_type 缺失（旧版 Claude Code）时才退回按文本猜
+        if ntype == "permission_prompt" or (
+                not ntype and ("permission" in message.lower() or "授权" in message)):
             return "🔐 需要授权", "decision", "**Claude Code 需要你的授权才能继续**"
+        if ntype in ("elicitation_dialog", "elicitation_url_dialog"):
+            return "🙋 需要你回答", "decision", "**Claude Code 在等你回答一个问题**"
         return "⏳ 等待输入", "warning", "**Claude Code 正在等待你的输入**"
     if event_name == "SessionEnd":
         return "👋 会话结束", "ended", "**Claude Code 会话已结束**"
@@ -1262,6 +1294,15 @@ def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
 
     if event_name == "Notification" and payload.get("message"):
         lines.append("📩 %s" % truncate(payload["message"], 300))
+
+    if event_name == "Stop":
+        # 只展示 description；command 里可能带 token 或内部地址，不往外发
+        pending = pending_background_tasks(payload)
+        for task in pending[:MAX_LISTED_TASKS]:
+            lines.append("%s %s" % (TASK_ICONS.get(task.get("type"), "⚙️"),
+                                      truncate(str(task.get("description") or task.get("type") or "后台任务"), 80)))
+        if len(pending) > MAX_LISTED_TASKS:
+            lines.append("…另有 %d 个后台任务" % (len(pending) - MAX_LISTED_TASKS))
 
     if event_name == "SessionEnd" and payload.get("reason"):
         lines.append("🚪 结束原因：`%s`" % payload["reason"])
@@ -1349,6 +1390,14 @@ def should_notify(payload: dict, cfg: dict, stats: dict | None = None) -> tuple[
     events = effective_events(cfg)
     if event_name not in events:
         return False, "事件 %s 不在 events=%s 中" % (event_name, events)
+    if event_name == "Notification":
+        ntype = notification_type(payload)
+        if ntype in SILENT_NOTIFICATION_TYPES:
+            return False, "通知类型 %s 不需要用户操作" % ntype
+        # idle_prompt 只是「回复完 60 秒没人输入」的计时器，后台任务还在跑时也会触发。
+        # Stop 已经推送过本轮结束（或后台运行中），再推一条「等待输入」只会误导。
+        if ntype == "idle_prompt" and "Stop" in events:
+            return False, "idle_prompt 与 Stop 通知重复"
     if in_quiet_hours(cfg.get("quiet_hours")):
         return False, "处于静默时段 %s" % (cfg.get("quiet_hours"),)
     # 不能写 `cfg.get(...) or 0`：[]、""、0 全是假值，会被一律当成「没设门槛」，

@@ -218,8 +218,8 @@ If an explicitly configured source is broken (missing file, invalid JSON, unknow
 
 | Event | When | Notification | Enabled by default |
 |-------|------|--------------|:------------------:|
-| `Stop` | Claude finishes a turn | ✅ Task complete | ✔ |
-| `Notification` | Claude needs permission or has been waiting for input | 🔐 Permission needed · ⏳ Waiting for input | ✔ |
+| `Stop` | Claude finishes a turn | ✅ Task complete · ⏳ Background tasks still running (listed) | ✔ |
+| `Notification` | Claude needs permission, an MCP server asks a question, or it has been idle for 60 s (idle prompts are skipped when `Stop` is enabled) | 🔐 Permission needed · 🙋 Needs your answer · ⏳ Waiting for input | ✔ |
 | `SubagentStop` | A subagent finishes | 📦 Subtask complete | |
 | `SessionEnd` | The session exits | 👋 Session ended | |
 

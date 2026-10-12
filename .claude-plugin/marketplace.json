@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Claude Code 多渠道通知插件：飞书 / 企业微信 / 钉钉 / Slack / Telegram / Bark",
-    "version": "0.3.1"
+    "version": "0.3.2"
   },
   "plugins": [
     {
