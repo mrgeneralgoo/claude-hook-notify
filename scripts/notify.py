@@ -45,6 +45,7 @@ from notify_channels import (
     CHANNELS, DEFAULT_CHANNEL, SEND_STATUSES, STATUSES, Message,
     destination_fields, get_channel,
 )
+from notify_recap import generate as generate_recap
 
 CONFIG_DIR = Path.home() / ".config" / "claude-hook-notify"
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -60,9 +61,9 @@ LEGACY_PROJECT_CONFIG_NAME = "lark.json"
 DEFAULT_EVENTS = ["Stop", "Notification"]
 MAX_SUMMARY_CHARS = 600
 
-# hook 里的总时间预算。plugin.json 给的外部硬超时是 15 秒，被杀掉的话
+# hook 里的总时间预算。plugin.json 给的外部硬超时是 40 秒，被杀掉的话
 # 顶层 except 和 exit 0 都不会执行，用户会看到 hook timeout。留足余量。
-HOOK_BUDGET_SECONDS = 9.0
+HOOK_BUDGET_SECONDS = 30.0
 MAX_STDIN_BYTES = 1 << 20          # 1 MiB，hook 事件远小于此
 MAX_CONFIG_BYTES = 256 << 10      # 配置文件上限，防止特殊文件无界读取
 MAX_RESPONSE_BYTES = 64 << 10     # 只读取有限的响应体
@@ -327,6 +328,8 @@ def load_config(cwd: str | None = None) -> dict:
         cfg["_fatal"] = err
     elif project_cfg:
         rejected = sorted(set(project_cfg) & DESTINATION_KEYS)
+        if "recap" in project_cfg:
+            warnings.append("已忽略项目配置中的 recap：仓库内文件不能配置摘要模型端点。")
         if rejected:
             warnings.append(
                 "已忽略项目配置 %s 中的 %s：仓库内文件不允许指定通知目的地。"
@@ -1322,7 +1325,8 @@ def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
         elif stats.get("turn_kind") == "prompt":
             lines.append("**📋 本轮任务**\n_（本轮输入为图片或附件）_")
         if stats.get("assistant_text"):
-            lines.append("**📝 完成情况**\n%s" % truncate(stats["assistant_text"], MAX_SUMMARY_CHARS))
+            lines.append("**📝 完成情况**\n%s" % truncate(
+                stats.get("assistant_recap", stats["assistant_text"]), MAX_SUMMARY_CHARS))
 
     meta = []
     if stats.get("tool_calls"):
@@ -1498,15 +1502,33 @@ def _run_hook(args, budget: Budget) -> int:
             print("skip: %s" % reason)
         return 0
 
-    msg = build_hook_message(payload, cfg, stats, budget)
-
     if args.dry_run:
+        msg = build_hook_message(payload, cfg, stats, budget)
         print(json.dumps(render(cfg, msg), ensure_ascii=False, indent=2))
         return 0
 
-    # 网络超时取「配置值」与「剩余预算」的较小者，确保总耗时守在硬超时之内
-    timeout = budget.slice(float(cfg.get("timeout", 5)))
-    sent, detail = post(destination(cfg), render(cfg, msg), timeout, allowed_hosts(cfg))
+    dest = destination(cfg)
+    hosts = allowed_hosts(cfg)
+    recap_allowed = (summary_enabled(cfg) and stats.get("summary_reliable", True)
+                     and payload.get("hook_event_name", "Stop") in ("Stop", "SubagentStop")
+                     and len(stats.get("assistant_text") or "") > MAX_SUMMARY_CHARS)
+    recap_cfg = cfg.get("recap")
+    if recap_allowed and isinstance(recap_cfg, dict) and recap_cfg.get("enabled") is True:
+        # Validate the ordinary notification destination before sending transcript data anywhere.
+        valid, _, _, _ = prepare_request(dest, {}, hosts)
+        if valid:
+            send_timeout = max(5.0, float(cfg.get("timeout", 5)))
+            recap_timeout = budget.remaining() - send_timeout - 5.0
+            if recap_timeout > 0:
+                recap = generate_recap(recap_cfg, stats.get("user_prompt", ""),
+                                       stats.get("assistant_text", ""), recap_timeout)
+                if recap:
+                    stats = dict(stats, assistant_recap=recap)
+
+    msg = build_hook_message(payload, cfg, stats, budget)
+    # Reserve time for recap while retaining the configured notification timeout.
+    timeout = budget.slice(max(0.1, float(cfg.get("timeout", 5))))
+    sent, detail = post(dest, render(cfg, msg), timeout, hosts)
     log("send %s: %s" % ("ok" if sent else "FAIL", detail), debug or not sent)
     return 0
 

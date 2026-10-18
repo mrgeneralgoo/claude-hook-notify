@@ -35,7 +35,7 @@ The notification content is generated once and is the same on every channel. Eac
 - **Not noisy.** Event allowlist, quiet hours, and a minimum task duration filter.
 - **Zero dependencies.** Python standard library only — no `pip install`, no `jq`, no `curl`.
 - **Safe by default.** A repository's config file can never choose where your notifications go. See [Security](#security).
-- **Never slows down your session.** Hooks run within a 9-second budget and exit quietly on any error.
+- **Bounded execution.** Synchronous hooks have a 30-second budget and exit quietly on any error.
 
 Example (Feishu card; other channels carry the same content in their own format):
 
@@ -154,6 +154,7 @@ The user config lives at `~/.config/claude-hook-notify/config.json`. A full exam
 | `destination` | — | Which entry of `destinations` to use. |
 | `events` | `["Stop", "Notification"]` | Hook events that trigger a notification. `[]` means none. |
 | `include_summary` | `true` | Include your prompt and Claude's reply. Set to `false` to send metadata only. |
+| `recap` | Disabled | Optional OpenAI-compatible summary of long replies. User config only; see below. |
 | `min_duration_seconds` | `0` | Skip turns shorter than this. |
 | `quiet_hours` | `null` | Do not notify during these hours, e.g. `[22, 8]` for 22:00–08:00. |
 | `timeout` | `5` | Send timeout in seconds. |
@@ -161,6 +162,39 @@ The user config lives at `~/.config/claude-hook-notify/config.json`. A full exam
 | `debug` | `false` | Write a detailed log to `~/.config/claude-hook-notify/debug.log`. |
 
 Settings are validated strictly. An invalid privacy or filter setting is treated in its most restrictive form (for example, a malformed `quiet_hours` means "always quiet"), and `doctor` prints a warning.
+
+### Optional recaps
+
+By default, long replies are truncated rather than summarized. To enable model-generated recaps, add this object to your **user config**, alongside the existing notification destination:
+
+```json
+{
+  "recap": {
+    "enabled": true,
+    "base_url": "https://api.example.com/v1",
+    "model": "your-model",
+    "api_key_env": "NOTIFY_RECAP_API_KEY",
+    "timeout": 15
+  }
+}
+```
+
+Replace the endpoint and model. Credentials support either of these fields inside `recap`:
+
+- `"api_key_env": "NOTIFY_RECAP_API_KEY"`: read the key from that environment variable, set before starting Claude Code.
+- `"api_key": "your-api-key"`: read the literal key directly from your user config. Do not commit real keys to a repository.
+
+If `api_key` is present, it takes precedence. An invalid or empty explicit key disables recap for that request rather than falling back to the environment. `api_key_env` always means an environment variable name, never a literal key.
+
+The key is sent as a Bearer token. The endpoint must support non-streaming `POST /chat/completions`, `messages`, and `max_tokens`; the plugin appends `/chat/completions` to `base_url`. Only HTTPS is accepted, without URL credentials, a query, or a fragment. Redirects are refused.
+
+- Recaps apply only to eligible `Stop` / `SubagentStop` replies longer than 600 characters. The existing event filters and `include_summary` setting still apply. Short replies, permission prompts, manual sends, and `--dry-run` never call the model.
+- The request contains the current prompt, capped at 2,000 characters, and the last assistant reply. Replies over 12,000 characters retain their beginning and end with an omitted-middle marker. No tool logs or full conversation history are uploaded.
+- The model is asked for a same-language summary within 200 characters that preserves results, risks, and unfinished actions. Accepted output is capped at 240 characters. Notification status remains determined by the hook, not the model.
+- The recap request defaults to a 15-second wall-clock limit. The remaining hook budget may shorten it to reserve notification time and message-building time. No retries are made. Invalid settings, a missing key, malformed output, or request failure retain the original truncated reply.
+- Wall-clock enforcement uses Unix signal timers. If these are unavailable, recap is skipped and ordinary notification delivery continues.
+
+**Enabling recap sends conversation text to the selected model provider and may incur charges.** It is an additional destination, separate from your notification channel. Project configs cannot enable or override it. Summaries are lossy and do not provide full-text viewing.
 
 ### Switching channels
 
@@ -190,7 +224,7 @@ A project can add `.claude/notify.json` to pick a registered destination by name
 {"destination": "team", "events": ["Stop"]}
 ```
 
-This file is safe to commit. It **cannot** contain URLs, tokens, `channel`, `destinations`, `allowed_hosts`, or `debug` — those keys are ignored with a warning. Behavior settings can only be tightened:
+This file is safe to commit. It **cannot** contain URLs, tokens, `channel`, `destinations`, `allowed_hosts`, `recap`, or `debug` — those keys are ignored with a warning. Behavior settings can only be tightened:
 
 | Key | Merge rule |
 |-----|------------|
@@ -262,7 +296,8 @@ Two things to know before you start:
 
 Additionally:
 
-- Requests go only to HTTPS URLs on the channel's allowlisted hosts.
+- Notification requests go only to HTTPS URLs on the channel's allowlisted hosts.
+- Optional recap requests use the explicitly configured HTTPS model endpoint, refuse redirects, and may incur model-provider charges.
 - Error messages and logs never include URLs, tokens, or text returned by the remote server.
 - Telegram bot tokens and chat IDs, and Bark device keys, are format-checked before use, so a malformed value cannot redirect the request.
 
@@ -287,7 +322,7 @@ If notifications do not arrive:
    `{"code":0,...}` means it works. `code: 19021` means the signature is wrong or the timestamp is more than an hour off.
 4. Run `/plugin` in Claude Code and make sure claude-hook-notify is enabled.
 
-**Will hooks slow down my session?** No. Each hook has a 9-second internal budget and a watchdog, exits with status 0 on any problem, and the plugin manifest adds a 15-second hard timeout.
+**Will hooks slow down my session?** Hooks run synchronously, so slow I/O can delay the session. Each hook has a 30-second internal budget and a watchdog, exits with status 0 on any problem, and the plugin manifest declares a 40-second timeout enforced by Claude Code. The send timeout remains 5 seconds by default.
 
 ## Migrating from claude-hook-lark
 
@@ -313,7 +348,7 @@ The plugin itself must be reinstalled:
 
 ## Development
 
-Run the tests (no dependencies; about 15 seconds, because two tests wait for the watchdog):
+Run the tests (no dependencies; about 40 seconds, including watchdog timeout tests):
 
 ```bash
 python3 -m unittest discover -s tests -v

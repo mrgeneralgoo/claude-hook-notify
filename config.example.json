@@ -14,6 +14,13 @@
 
   "events": ["Stop", "Notification"],
   "include_summary": true,
+  "recap": {
+    "enabled": false,
+    "base_url": "https://api.example.com/v1",
+    "model": "your-model",
+    "api_key_env": "NOTIFY_RECAP_API_KEY",
+    "timeout": 15
+  },
   "min_duration_seconds": 0,
   "quiet_hours": null,
   "timeout": 5,

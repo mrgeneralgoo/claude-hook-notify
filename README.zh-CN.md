@@ -36,7 +36,7 @@
 - **不吵人**：事件白名单、静默时段、最短耗时过滤。
 - **零依赖**：只用 Python 标准库，不需要 `pip install`、`jq` 或 `curl`。
 - **默认安全**：仓库里的配置文件无法决定通知发往哪里，见[安全](#安全)。
-- **不拖慢会话**：hook 有 9 秒时间预算，出任何问题都安静退出。
+- **执行时间有界**：同步 hook 有 30 秒时间预算，出任何问题都安静退出。
 
 示例（飞书卡片；其他渠道内容相同，排版随平台）：
 
@@ -153,6 +153,7 @@ python3 scripts/notify.py doctor --test
 | `destination` | — | 选用 `destinations` 里的哪一项 |
 | `events` | `["Stop", "Notification"]` | 哪些 hook 事件触发通知；`[]` 表示一个都不发 |
 | `include_summary` | `true` | 是否包含你的提问和 Claude 的回复；设为 `false` 只发元信息 |
+| `recap` | 关闭 | 可选的 OpenAI 兼容长回复摘要，仅允许用户级配置，见下文 |
 | `min_duration_seconds` | `0` | 本轮耗时低于该值就不推送 |
 | `quiet_hours` | `null` | 静默时段，如 `[22, 8]` 表示 22:00–08:00 不打扰 |
 | `timeout` | `5` | 发送超时（秒） |
@@ -160,6 +161,39 @@ python3 scripts/notify.py doctor --test
 | `debug` | `false` | 把详细日志写到 `~/.config/claude-hook-notify/debug.log` |
 
 配置会被严格校验。隐私或过滤类配置写错时按最严格的方式处理（例如 `quiet_hours` 格式不对就当作「一直静默」），并由 `doctor` 打印告警。
+
+### 可选 recap 摘要
+
+默认仍然截断长回复，不调用模型。需要生成摘要时，在**用户配置**中加入以下对象，保留原有通知目的地配置：
+
+```json
+{
+  "recap": {
+    "enabled": true,
+    "base_url": "https://api.example.com/v1",
+    "model": "your-model",
+    "api_key_env": "NOTIFY_RECAP_API_KEY",
+    "timeout": 15
+  }
+}
+```
+
+替换端点和模型。密钥支持在 `recap` 对象中使用以下任一种形式：
+
+- `"api_key_env": "NOTIFY_RECAP_API_KEY"`：读取对应环境变量的值，需要在启动 Claude Code 前设置。
+- `"api_key": "your-api-key"`：直接读取用户配置里的字面量密钥。不要把含真实密钥的配置提交到仓库。
+
+存在 `api_key` 字段时优先使用它。显式密钥为空或非法时，本次跳过 recap，不会悄悄回退到环境变量。`api_key_env` 始终表示环境变量名，不会把其中的内容猜作密钥字面量。
+
+密钥通过 Bearer token 发送。端点需支持非流式 `POST /chat/completions`、`messages` 和 `max_tokens`；插件会在 `base_url` 后拼接 `/chat/completions`。仅接受 HTTPS，地址不能包含用户名、密码、查询参数或片段，也不会跟随重定向。
+
+- 只处理满足通知条件、超过 600 字符的 `Stop` / `SubagentStop` 回复，仍遵守事件过滤和 `include_summary`。短回复、授权提醒、手动发送和 `--dry-run` 不调用模型。
+- 请求仅包含本轮提问和最后一条助手回复。提问最多 2,000 字符；回复超过 12,000 字符时保留首尾并标注省略中间内容。不上传工具日志或完整会话历史。
+- 提示模型用原语言、在 200 字符内保留结果、风险和未完成事项，接受的输出最多 240 字符。通知状态仍由 hook 决定，不交给模型判断。
+- 摘要请求默认最多等待 15 秒，实际会根据 hook 剩余预算缩短，为通知发送和消息组装留出时间。不重试；配置非法、密钥缺失、响应异常或请求失败时，继续发送原来的截断回复。
+- 墙钟超时依赖 Unix 信号计时器。平台不支持时跳过 recap，保留普通通知行为。
+
+**开启 recap 会把上述会话文本发送到选定的模型服务，并可能产生费用。** 这是独立于通知渠道的额外目的地，仓库配置不能开启或覆盖它。摘要会丢失细节，不能替代全文查看。
 
 ### 切换渠道
 
@@ -189,7 +223,7 @@ python3 scripts/notify.py send -t "预览" -s info -m "hello" --dry-run
 {"destination": "值班群", "events": ["Stop"]}
 ```
 
-这个文件可以放心提交。它**不能**包含 URL、令牌、`channel`、`destinations`、`allowed_hosts` 或 `debug` —— 写了会被忽略并告警。行为类配置只能收窄：
+这个文件可以放心提交。它**不能**包含 URL、令牌、`channel`、`destinations`、`allowed_hosts`、`recap` 或 `debug` —— 写了会被忽略并告警。行为类配置只能收窄：
 
 | 键 | 合并方式 |
 |----|----------|
@@ -261,7 +295,8 @@ python3 "$NOTIFY" send -t "需要确认" -s decision -m "REST 还是 GraphQL？"
 
 此外：
 
-- 请求只发往该渠道白名单内主机的 HTTPS 地址。
+- 通知请求只发往该渠道白名单内主机的 HTTPS 地址。
+- 可选 recap 请求发往用户明确配置的 HTTPS 模型端点，不跟随重定向，并可能产生模型服务费用。
 - 错误信息和日志中永远不出现 URL、令牌或远端返回的文本。
 - Telegram 的 bot token、chat ID 和 Bark 的 device key 使用前会校验格式，畸形值无法把请求导向别处。
 
@@ -286,7 +321,7 @@ python3 scripts/notify.py doctor --test  # 并发送一条测试消息
    返回 `{"code":0,...}` 才算通。`code: 19021` 表示签名错误或时间戳偏差超过 1 小时。
 4. 在 Claude Code 里运行 `/plugin`，确认 claude-hook-notify 已启用。
 
-**hook 会拖慢会话吗？** 不会。每个 hook 有 9 秒内部预算和看门狗，出任何问题都以 0 退出；插件清单另有 15 秒硬超时兜底。
+**hook 会拖慢会话吗？** hook 同步执行，慢 I/O 会让会话等待。每个 hook 有 30 秒内部预算和看门狗，出任何问题都以 0 退出；插件清单声明 40 秒外部超时，由 Claude Code 执行。通知发送超时仍默认 5 秒。
 
 ## 从 claude-hook-lark 升级
 
@@ -312,7 +347,7 @@ python3 scripts/notify.py doctor --test  # 并发送一条测试消息
 
 ## 开发
 
-运行测试（无需依赖；约 15 秒，其中两个用例会等待看门狗触发）：
+运行测试（无需依赖；约 40 秒，包含等待看门狗触发的用例）：
 
 ```bash
 python3 -m unittest discover -s tests -v
