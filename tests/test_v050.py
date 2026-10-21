@@ -37,22 +37,22 @@ def build(payload=None, cfg=None, **kw):
 class TestResultLabelsAndOrder(unittest.TestCase):
     def test_original_label(self):
         body = build().body
-        self.assertIn("**📝 回复原文**\n已完成。", body)
+        self.assertIn("**回复原文**\n已完成。", body)
         self.assertNotIn("节选", body)
 
     def test_truncated_original_label(self):
         body = build(assistant_text="长" * 700).body
-        self.assertIn("**📝 回复原文（节选）**", body)
+        self.assertIn("**回复原文 · 节选**", body)
 
     def test_recap_label(self):
         body = build(assistant_text="长" * 700, assistant_recap="结论\n- 要点").body
-        self.assertIn("**🤖 AI 摘要**\n结论\n- 要点", body)
+        self.assertIn("**AI 摘要**\n结论\n- 要点", body)
         self.assertNotIn("回复原文", body)
 
     def test_result_first_without_generic_headline(self):
         for event in ("Stop", "SubagentStop"):
             body = build({"hook_event_name": event}).body
-            self.assertTrue(body.startswith("**📝 回复原文**"), body)
+            self.assertTrue(body.startswith("**回复原文**"), body)
             self.assertLess(body.index("回复原文"), body.index("本轮任务"))
             self.assertNotIn("已完成本轮任务", body)
             self.assertNotIn("子任务执行完成", body)
@@ -72,15 +72,15 @@ class TestResultLabelsAndOrder(unittest.TestCase):
         prompt = ("> [@x](mention://user/1) 请看这段\n> 第二行引用\n\n- 列表项\n"
                   + "很长的需求描述 " * 40)
         msg = build(user_prompt=prompt, assistant_text="答复正文")
-        task = msg.body.split("**📋 本轮任务**\n", 1)[1].split("\n")[0]
+        task = msg.body.split("**本轮任务**\n", 1)[1].split("\n")[0]
         self.assertNotIn("\n", task)
         self.assertFalse(task.startswith(">"))
         self.assertLessEqual(len(task), 120)
         self.assertTrue(task.startswith("[@x](mention://user/1) 请看这段 第二行引用 列表项"), task)
         self.assertNotIn("> ", task)
         # 结果分节仍然独占一个 block
-        self.assertTrue(msg.blocks[0].startswith("**📝 回复原文**"))
-        self.assertTrue(any(b.startswith("**📋 本轮任务**\n") and "\n" not in b.split("\n", 1)[1]
+        self.assertTrue(msg.blocks[0].startswith("**回复原文**"))
+        self.assertTrue(any(b.startswith("**本轮任务**\n") and "\n" not in b.split("\n", 1)[1]
                             for b in msg.blocks))
 
     def test_blocks_join_to_body(self):
@@ -99,6 +99,32 @@ class TestBarkRender(unittest.TestCase):
         self.assertEqual(bark.space_block("**A**\nx\n- y"), "**A**\n\nx\n- y")
         self.assertEqual(bark.space_block("**A** 正文\nx"), "**A** 正文\nx")
         self.assertEqual(bark.space_block("**A**"), "**A**")
+
+    def test_needs_you_is_time_sensitive(self):
+        self.assertEqual(bark.CHANNEL.render(Message(title="t", status="decision"))["level"],
+                         "timeSensitive")
+        for status in ("success", "running", "info"):
+            self.assertNotIn("level", bark.CHANNEL.render(Message(title="t", status=status)))
+
+    def test_needs_you_states_share_one_title(self):
+        heads = {}
+        for ntype in ("permission_prompt", "elicitation_dialog", "idle_prompt"):
+            msg = build({"hook_event_name": "Notification", "notification_type": ntype,
+                         "message": "Claude is waiting for your input"})
+            self.assertTrue(msg.title.startswith("🔴 等你处理"), msg.title)
+            self.assertEqual(msg.status, "decision")
+            heads[ntype] = msg.blocks[0]
+        self.assertEqual(heads["permission_prompt"], "**请求授权**")
+        self.assertEqual(heads["elicitation_dialog"], "**在等你回答**")
+        self.assertEqual(heads["idle_prompt"], "**在等你的下一步指示**")
+        idle = build({"hook_event_name": "Notification", "notification_type": "idle_prompt",
+                      "message": "Claude is waiting for your input"})
+        self.assertNotIn("waiting for your input", idle.body, "等待输入的英文原文与标题重复")
+
+    def test_subtask_is_green_success(self):
+        msg = build({"hook_event_name": "SubagentStop"})
+        self.assertTrue(msg.title.startswith("🟢 子任务完成"), msg.title)
+        self.assertEqual(msg.status, "success")
 
     def test_badge_only_when_positive_int(self):
         for value in (None, 0, -1, True, "3"):

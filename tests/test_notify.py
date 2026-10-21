@@ -275,21 +275,21 @@ class TestBuildHookPayload(unittest.TestCase):
         self.assertIn("任务完成", card["card"]["header"]["title"]["content"])
         json.dumps(card)  # 必须可序列化
 
-    def test_notification_permission_is_orange(self):
+    def test_notification_permission_is_red(self):
         card = ln.build_hook_payload(
             {"hook_event_name": "Notification", "cwd": os.getcwd(),
              "message": "Claude needs your permission to use Bash"},
             {},
         )
-        self.assertEqual(card["card"]["header"]["template"], "orange")
+        self.assertEqual(card["card"]["header"]["template"], "red")
 
-    def test_notification_idle_is_yellow(self):
+    def test_notification_idle_is_red(self):
         card = ln.build_hook_payload(
             {"hook_event_name": "Notification", "cwd": os.getcwd(),
              "message": "Claude is waiting for your input"},
             {},
         )
-        self.assertEqual(card["card"]["header"]["template"], "yellow")
+        self.assertEqual(card["card"]["header"]["template"], "red")
 
     def test_unknown_event_does_not_crash(self):
         card = ln.build_hook_payload({"hook_event_name": "WhoKnows", "cwd": os.getcwd()}, {})
@@ -314,30 +314,30 @@ class TestStopWithBackgroundTasks(unittest.TestCase):
 
     def test_running_task_reports_background(self):
         title, body = self.stop(background_tasks=[REAL_BG_TASK], session_crons=[])
-        self.assertIn("⏳ 后台运行中", title)
+        self.assertIn("🔵 后台运行中", title)
         self.assertIn("1 个后台任务仍在运行", body)
-        self.assertIn("🐚 Background sleep for second Stop payload capture", body)
+        self.assertIn("▸ Background sleep for second Stop payload capture", body)
         self.assertNotIn("SECRET-TOKEN", body)          # command 不外发
 
     def test_empty_or_missing_is_done(self):
         for extra in ({"background_tasks": [], "session_crons": []}, {}):
             title, _ = self.stop(**extra)
-            self.assertIn("✅ 任务完成", title, extra)
+            self.assertIn("🟢 任务完成", title, extra)
 
     def test_unknown_status_falls_back_to_done(self):
         title, _ = self.stop(background_tasks=[dict(REAL_BG_TASK, status="whatever")])
-        self.assertIn("✅ 任务完成", title)
+        self.assertIn("🟢 任务完成", title)
 
     def test_malformed_field_does_not_crash(self):
         for bad in ("x", None, [1, "a", None], {"id": 1}):
             title, _ = self.stop(background_tasks=bad)
-            self.assertIn("✅ 任务完成", title, bad)
+            self.assertIn("🟢 任务完成", title, bad)
 
     def test_many_tasks_are_capped(self):
         tasks = [dict(REAL_BG_TASK, id=str(i), description="任务%d" % i, type="agent") for i in range(8)]
         _, body = self.stop(background_tasks=tasks)
         self.assertIn("8 个后台任务", body)
-        self.assertIn("🤖 任务4", body)
+        self.assertIn("▸ 任务4", body)
         self.assertNotIn("任务5", body)
         self.assertIn("另有 3 个", body)
 
@@ -349,21 +349,24 @@ class TestNotificationType(unittest.TestCase):
 
     def test_permission_type_beats_text(self):
         h = self.header(message="Claude wants to run Bash", notification_type="permission_prompt")
-        self.assertIn("需要授权", h["title"]["content"])
-        self.assertEqual(h["template"], "orange")
+        self.assertIn("等你处理", h["title"]["content"])
+        self.assertEqual(h["template"], "red")
 
     def test_type_present_disables_text_guess(self):
-        h = self.header(message="mentions permission", notification_type="idle_prompt")
-        self.assertIn("等待输入", h["title"]["content"])
+        card = ln.build_hook_payload({"hook_event_name": "Notification", "cwd": os.getcwd(),
+                                      "message": "mentions permission",
+                                      "notification_type": "idle_prompt"}, {})
+        self.assertIn("下一步指示", card["card"]["body"]["elements"][0]["content"])
 
     def test_text_fallback_without_type(self):
-        h = self.header(message="Claude needs your permission to use Bash")
-        self.assertIn("需要授权", h["title"]["content"])
+        card = ln.build_hook_payload({"hook_event_name": "Notification", "cwd": os.getcwd(),
+                                      "message": "Claude needs your permission to use Bash"}, {})
+        self.assertIn("请求授权", card["card"]["body"]["elements"][0]["content"])
 
     def test_elicitation_needs_answer(self):
         for t in ("elicitation_dialog", "elicitation_url_dialog"):
             h = self.header(message="x", notification_type=t)
-            self.assertIn("需要你回答", h["title"]["content"], t)
+            self.assertIn("等你处理", h["title"]["content"], t)
 
     def test_idle_prompt_skipped_when_stop_enabled(self):
         idle = {"hook_event_name": "Notification", "message": "Claude is waiting for your input",
@@ -2510,7 +2513,7 @@ class TestCardHasNoBlankLines(unittest.TestCase):
         ])
         body = self._body(ln.build_hook_payload(
             {"hook_event_name": "Stop", "cwd": os.getcwd(), "transcript_path": path}, {}))
-        self.assertTrue(body.startswith("**📝 回复原文**\n单行回答\n**📋 本轮任务**\n单行任务\n"), body)
+        self.assertTrue(body.startswith("**回复原文**\n单行回答\n**本轮任务**\n单行任务\n"), body)
         self.assertNotIn("Claude Code 已完成本轮任务", body)
 
     def test_notification_card_body_has_no_double_newline(self):

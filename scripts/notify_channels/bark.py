@@ -91,6 +91,9 @@ class BarkChannel(Channel):
                             max(MAX_BODY_BYTES - len(tail.encode("utf-8")) - 2, 0))
         out = {"title": title, "markdown": "\n\n".join(p for p in (body, tail) if p),
                "group": "Claude Code"}
+        if msg.status == "decision":
+            # 等你处理：时效性通知，专注模式下也会亮屏提醒，在锁屏上更醒目
+            out["level"] = "timeSensitive"
         if isinstance(msg.badge, int) and not isinstance(msg.badge, bool) and msg.badge > 0:
             out["badge"] = msg.badge
         return out

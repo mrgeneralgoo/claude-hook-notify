@@ -19,15 +19,15 @@ from dataclasses import dataclass, field
 # 状态 → (图标, 中文)。颜色等视觉映射属于各渠道自己的事。
 # subtask / ended 只在 hook 内部使用，不对 send 的 -s 开放。
 STATUSES = {
-    "success": ("✅", "成功"),
-    "failed": ("❌", "失败"),
-    "running": ("⏳", "进行中"),
-    "decision": ("🤔", "待决策"),
-    "warning": ("⚠️", "警告"),
-    "error": ("⚠️", "异常"),
-    "info": ("💬", "信息"),
-    "subtask": ("📦", "子任务"),
-    "ended": ("👋", "结束"),
+    "success": ("🟢", "成功"),
+    "failed": ("🔴", "失败"),
+    "running": ("🔵", "进行中"),
+    "decision": ("🔴", "待决策"),
+    "warning": ("🟡", "警告"),
+    "error": ("🔴", "异常"),
+    "info": ("⚪", "信息"),
+    "subtask": ("🟣", "子任务"),
+    "ended": ("⚪", "结束"),
 }
 SEND_STATUSES = ("success", "failed", "running", "decision", "warning", "error", "info")
 

@@ -1232,7 +1232,6 @@ def in_quiet_hours(quiet, now_hour: int | None = None) -> bool:
 # Stop 输入里的 background_tasks 只列在途任务，实测状态为 running。只认这两个值：
 # 遇到不认识的状态时退回「任务完成」，宁可少报「仍在运行」，也不让人干等。
 PENDING_TASK_STATUSES = ("running", "pending")
-TASK_ICONS = {"shell": "🐚", "agent": "🤖"}
 MAX_LISTED_TASKS = 5
 
 # 这些 Notification 不需要用户做任何事（认证成功、表单已提交等），不推送。
@@ -1257,26 +1256,29 @@ def event_style(event_name: str, payload: dict) -> tuple[str, str, str]:
     if event_name == "Stop":
         pending = pending_background_tasks(payload)
         if pending:
-            return ("⏳ 后台运行中", "running",
+            return ("🔵 后台运行中", "running",
                     "**本轮已结束，%d 个后台任务仍在运行，完成后 Claude 会继续**" % len(pending))
-        return "✅ 任务完成", "success", "**Claude Code 已完成本轮任务**"
+        return "🟢 任务完成", "success", "**Claude Code 已完成本轮任务**"
     if event_name == "SubagentStop":
-        return "📦 子任务完成", "subtask", "**子任务执行完成**"
+        # 对用户来说子任务完成和任务完成是同一类（去看结果）：同一种颜色，标题仍写明是子任务
+        return "🟢 子任务完成", "success", "**子任务执行完成**"
     if event_name == "Notification":
         ntype = notification_type(payload)
         message = (payload.get("message") or "").strip()
+        # 授权、提问、等待输入对用户是同一件事：Claude 卡住了，等你处理。
+        # 标题只用一种状态，具体是哪种放在正文第一行。
         # notification_type 缺失（旧版 Claude Code）时才退回按文本猜
         if ntype == "permission_prompt" or (
                 not ntype and ("permission" in message.lower() or "授权" in message)):
-            return "🔐 需要授权", "decision", "**Claude Code 需要你的授权才能继续**"
+            return "🔴 等你处理", "decision", "**请求授权**"
         if ntype in ("elicitation_dialog", "elicitation_url_dialog"):
-            return "🙋 需要你回答", "decision", "**Claude Code 在等你回答一个问题**"
-        return "⏳ 等待输入", "warning", "**Claude Code 正在等待你的输入**"
+            return "🔴 等你处理", "decision", "**在等你回答**"
+        return "🔴 等你处理", "decision", "**在等你的下一步指示**"
     if event_name == "SessionEnd":
-        return "👋 会话结束", "ended", "**Claude Code 会话已结束**"
+        return "⚪ 会话结束", "ended", "**Claude Code 会话已结束**"
     if event_name == "SessionStart":
-        return "🚀 会话开始", "running", "**Claude Code 会话已启动**"
-    return "🔔 Claude Code", "running", "**状态更新**"
+        return "🔵 会话开始", "running", "**Claude Code 会话已启动**"
+    return "⚪ Claude Code", "running", "**状态更新**"
 
 
 _LIST_MARK_RE = re.compile(r"^(?:>\s*)*(?:[-*+]\s+|\d+[.)]\s+)?")
@@ -1321,23 +1323,24 @@ def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
     # 每个元素是一个分节：body 用单换行拼起来（飞书等渠道的骨架），blocks 原样交给
     # 需要分节留白的渠道（bark）
     extra = []                  # 紧跟标题行的事件信息（通知正文、结束原因）
-    if event_name == "Notification" and payload.get("message"):
-        extra.append("📩 %s" % truncate(payload["message"], 300))
+    # 等待输入的原文（Claude is waiting for your input）和正文标题重复，不再列出
+    if (event_name == "Notification" and payload.get("message")
+            and notification_type(payload) != "idle_prompt"):
+        extra.append("%s" % truncate(payload["message"], 300))
 
     tasks_block = ""
     pending = []
     if event_name == "Stop":
         # 只展示 description；command 里可能带 token 或内部地址，不往外发
         pending = pending_background_tasks(payload)
-        task_lines = ["%s %s" % (TASK_ICONS.get(task.get("type"), "⚙️"),
-                                 truncate(str(task.get("description") or task.get("type") or "后台任务"), 80))
+        task_lines = ["▸ %s" % truncate(str(task.get("description") or task.get("type") or "后台任务"), 80)
                       for task in pending[:MAX_LISTED_TASKS]]
         if len(pending) > MAX_LISTED_TASKS:
             task_lines.append("…另有 %d 个后台任务" % (len(pending) - MAX_LISTED_TASKS))
         tasks_block = "\n".join(task_lines)
 
     if event_name == "SessionEnd" and payload.get("reason"):
-        extra.append("🚪 结束原因：`%s`" % payload["reason"])
+        extra.append("结束原因：`%s`" % payload["reason"])
 
     task_section = result_section = ""
     if (summary_enabled(cfg) and stats.get("summary_reliable", True)
@@ -1345,13 +1348,13 @@ def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
         # 没有可展示的文本（命令、系统事件、纯图片）时直接省略，不放占位说明
         task_text = _one_line(stats.get("user_prompt"), 120)
         if task_text:
-            task_section = "**📋 本轮任务**\n%s" % task_text
+            task_section = "**本轮任务**\n%s" % task_text
         text = (stats.get("assistant_text") or "").strip()
         if text:
             if stats.get("assistant_recap"):
-                label, shown = "🤖 AI 摘要", stats["assistant_recap"]
+                label, shown = "AI 摘要", stats["assistant_recap"]
             else:
-                label = "📝 回复原文（节选）" if len(text) > MAX_SUMMARY_CHARS else "📝 回复原文"
+                label = "回复原文 · 节选" if len(text) > MAX_SUMMARY_CHARS else "回复原文"
                 shown = text
             result_section = "**%s**\n%s" % (label, truncate(shown, MAX_SUMMARY_CHARS))
 
@@ -1365,12 +1368,12 @@ def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
 
     meta = []
     if stats.get("tool_calls"):
-        meta.append("🔧 %d 次工具调用" % stats["tool_calls"])
+        meta.append("%d 次工具调用" % stats["tool_calls"])
     duration = turn_duration(stats)
     if duration is not None:
-        meta.append("⏱️ 用时 %s" % human_duration(duration))
+        meta.append("用时 %s" % human_duration(duration))
     if git.get("uncommitted"):
-        meta.append("📝 %d 个待提交" % git["uncommitted"])
+        meta.append("%d 个待提交" % git["uncommitted"])
     if meta:
         lines.append(" · ".join(meta))
 
@@ -1770,7 +1773,7 @@ def cmd_doctor(args) -> int:
         return 0
 
     msg = Message(
-        title="🔔 claude-hook-notify 测试",
+        title="🔵 claude-hook-notify 测试",
         body="**配置测试成功**\n如果你收到这条消息，说明%s配置正确。" % channel.label,
         status="running",
         fields=[("主机", hostname()), ("目录", os.path.basename(os.getcwd()))],
