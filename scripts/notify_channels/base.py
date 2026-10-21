@@ -45,6 +45,9 @@ class Message:
     fields: list = field(default_factory=list)   # [(标签, 值), ...]，值可含行内 markdown
     footer: str = ""
     color: str = ""      # 渠道私有的颜色提示（目前只有 lark 认），其余渠道忽略
+    # body 按分节拆开的版本；需要分节留白的渠道（目前只有 bark）用它，其余渠道用 body
+    blocks: list = field(default_factory=list)
+    badge: int | None = None   # 未读计数，目前只有 bark 用
 
 
 class Channel:

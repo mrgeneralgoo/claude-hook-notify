@@ -34,6 +34,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -45,6 +46,7 @@ from notify_channels import (
     CHANNELS, DEFAULT_CHANNEL, SEND_STATUSES, STATUSES, Message,
     destination_fields, get_channel,
 )
+from notify_channels.base import md_to_plain
 from notify_recap import generate as generate_recap
 
 CONFIG_DIR = Path.home() / ".config" / "claude-hook-notify"
@@ -80,6 +82,8 @@ PROJECT_SAFE_KEYS = frozenset({
 })
 # 目的地字段：各渠道的凭据字段并集，加上渠道选择、主机白名单和具名表
 DEST_FIELDS = destination_fields()
+# 目的地里取值是 boolean 而不是字符串的字段（目前只有 bark 的 badge 开关）
+BOOL_DEST_FIELDS = frozenset({"badge"})
 DESTINATION_KEYS = DEST_FIELDS | {"channel", "allowed_hosts", "webhooks", "destinations"}
 
 
@@ -422,7 +426,10 @@ def validate_credentials(cfg: dict, warnings: list) -> None:
     （最高优先级）给了正确地址时，通知本该正常发出，却因为早先写下的 _fatal
     被跳过 —— 而且这个行为还取决于「项目配置存不存在」，因为那才会触发早校验。
     """
-    for key in sorted(DEST_FIELDS):
+    if "badge" in cfg and not isinstance(cfg["badge"], bool):
+        warnings.append("badge 必须是 true 或 false（当前是 %s），已按默认（开启）处理。"
+                        % _type_name(cfg["badge"]))
+    for key in sorted(DEST_FIELDS - BOOL_DEST_FIELDS):
         if key in cfg and not isinstance(cfg[key], str):
             msg = "%s 必须是字符串（当前是 %s），已停止发送。" % (key, _type_name(cfg[key]))
             warnings.append(msg)
@@ -718,7 +725,7 @@ def prepare_request(dest: dict, payload: dict, hosts: tuple | None = None):
     if channel is None:
         return False, "未知的通知渠道", "", {}
     for key in channel.dest_keys:
-        if key in dest and not isinstance(dest[key], str):
+        if key in dest and key not in BOOL_DEST_FIELDS and not isinstance(dest[key], str):
             return False, "%s 必须是字符串" % key, "", {}
     missing = [k for k in channel.required if not dest.get(k)]
     if missing:
@@ -1106,10 +1113,11 @@ def session_fields(session_id: str) -> list[tuple]:
     """会话 ID 与项目/分支/主机同排展示，不单独占一行。
 
     会话名不再单列字段 —— 它已经在标题里了，重复一遍纯属浪费卡片空间。
+    只展示前 8 位（UUID 第一段）：完整 ID 在手机上要折成两行，前 8 位足够辨认。
     """
     if not session_id:
         return []
-    return [("会话 ID", "`%s`" % session_id)]
+    return [("会话 ID", "`%s`" % session_id[:8])]
 
 
 # Claude Code 会把 slash command、本地命令输出、记忆输入等也写成 type=user 的记录，
@@ -1271,6 +1279,18 @@ def event_style(event_name: str, payload: dict) -> tuple[str, str, str]:
     return "🔔 Claude Code", "running", "**状态更新**"
 
 
+_LIST_MARK_RE = re.compile(r"^(?:>\s*)*(?:[-*+]\s+|\d+[.)]\s+)?")
+
+
+def _one_line(text, limit: int) -> str:
+    """把用户提示压成单行纯文本：去引用 / 列表标记，空白折叠成一个空格。
+
+    多行 markdown 一旦被截断，未闭合的引用块会吞掉后面的分节；而且长提示会压过结果。
+    """
+    parts = (_LIST_MARK_RE.sub("", ln.strip()) for ln in md_to_plain(text or "").split("\n"))
+    return truncate(" ".join(" ".join(parts).split()), limit)
+
+
 def summary_enabled(cfg: dict) -> bool:
     """摘要开关。键缺失才默认开启；只认真正的 boolean，其余一律按关闭处理。"""
     if "include_summary" not in cfg:
@@ -1293,40 +1313,55 @@ def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
     prefix, status, headline = event_style(event_name, payload)
     name = project_name(cwd, git)
 
-    lines = [headline]
-
-    if event_name == "Notification" and payload.get("message"):
-        lines.append("📩 %s" % truncate(payload["message"], 300))
-
-    if event_name == "Stop":
-        # 只展示 description；command 里可能带 token 或内部地址，不往外发
-        pending = pending_background_tasks(payload)
-        for task in pending[:MAX_LISTED_TASKS]:
-            lines.append("%s %s" % (TASK_ICONS.get(task.get("type"), "⚙️"),
-                                      truncate(str(task.get("description") or task.get("type") or "后台任务"), 80)))
-        if len(pending) > MAX_LISTED_TASKS:
-            lines.append("…另有 %d 个后台任务" % (len(pending) - MAX_LISTED_TASKS))
-
-    if event_name == "SessionEnd" and payload.get("reason"):
-        lines.append("🚪 结束原因：`%s`" % payload["reason"])
-
     # 无论是否输出摘要都要读一次 transcript —— 会话名只存在于其中
     if stats is None:
         stats = parse_for_event(payload)
     session_id, session_name = session_context(payload, stats)
 
+    # 每个元素是一个分节：body 用单换行拼起来（飞书等渠道的骨架），blocks 原样交给
+    # 需要分节留白的渠道（bark）
+    extra = []                  # 紧跟标题行的事件信息（通知正文、结束原因）
+    if event_name == "Notification" and payload.get("message"):
+        extra.append("📩 %s" % truncate(payload["message"], 300))
+
+    tasks_block = ""
+    pending = []
+    if event_name == "Stop":
+        # 只展示 description；command 里可能带 token 或内部地址，不往外发
+        pending = pending_background_tasks(payload)
+        task_lines = ["%s %s" % (TASK_ICONS.get(task.get("type"), "⚙️"),
+                                 truncate(str(task.get("description") or task.get("type") or "后台任务"), 80))
+                      for task in pending[:MAX_LISTED_TASKS]]
+        if len(pending) > MAX_LISTED_TASKS:
+            task_lines.append("…另有 %d 个后台任务" % (len(pending) - MAX_LISTED_TASKS))
+        tasks_block = "\n".join(task_lines)
+
+    if event_name == "SessionEnd" and payload.get("reason"):
+        extra.append("🚪 结束原因：`%s`" % payload["reason"])
+
+    task_section = result_section = ""
     if (summary_enabled(cfg) and stats.get("summary_reliable", True)
             and event_name in ("Stop", "SubagentStop")):
-        if stats.get("user_prompt"):
-            lines.append("**📋 本轮任务**\n%s" % truncate(stats["user_prompt"], 300))
-        elif stats.get("turn_kind") == "tagged":
-            # 有边界但没有可展示文本：给个中性说明，好过让这一行凭空消失
-            lines.append("**📋 本轮任务**\n_（由命令或系统事件触发，内容不展示）_")
-        elif stats.get("turn_kind") == "prompt":
-            lines.append("**📋 本轮任务**\n_（本轮输入为图片或附件）_")
-        if stats.get("assistant_text"):
-            lines.append("**📝 完成情况**\n%s" % truncate(
-                stats.get("assistant_recap", stats["assistant_text"]), MAX_SUMMARY_CHARS))
+        # 没有可展示的文本（命令、系统事件、纯图片）时直接省略，不放占位说明
+        task_text = _one_line(stats.get("user_prompt"), 120)
+        if task_text:
+            task_section = "**📋 本轮任务**\n%s" % task_text
+        text = (stats.get("assistant_text") or "").strip()
+        if text:
+            if stats.get("assistant_recap"):
+                label, shown = "🤖 AI 摘要", stats["assistant_recap"]
+            else:
+                label = "📝 回复原文（节选）" if len(text) > MAX_SUMMARY_CHARS else "📝 回复原文"
+                shown = text
+            result_section = "**%s**\n%s" % (label, truncate(shown, MAX_SUMMARY_CHARS))
+
+    if result_section:
+        # 标题已经说明了结论，通用的开场白只是噪音，把结果放在最前；
+        # 例外：仍有后台任务在跑时，开场白本身带着真实信息
+        lines = ([headline] if pending else []) + [result_section, task_section, tasks_block]
+    else:
+        lines = [headline] + extra + [tasks_block, task_section]
+    lines = [ln for ln in lines if ln]
 
     meta = []
     if stats.get("tool_calls"):
@@ -1350,7 +1385,8 @@ def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
         event_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     return Message(title="%s · %s" % (prefix, card_subject(session_name, name)),
-                   body="\n".join(lines), status=status, fields=fields, footer=footer)
+                   body="\n".join(lines), status=status, fields=fields, footer=footer,
+                   blocks=list(lines))
 
 
 def duration_lower_bound(stats: dict) -> float | None:
@@ -1434,6 +1470,74 @@ def should_notify(payload: dict, cfg: dict, stats: dict | None = None) -> tuple[
     return True, ""
 
 
+# ── 未读计数（bark 图标角标）─────────────────────────────────────────
+
+BADGE_TTL_SECONDS = 24 * 3600
+MAX_BADGE_BYTES = 64 << 10
+
+
+def _badge_path() -> Path:
+    return CONFIG_DIR / "badge.json"
+
+
+def load_badge() -> dict:
+    """读取 {session_id: {"n": 条数, "ts": 时间戳}}。文件缺失、损坏、过大或结构不对都按空处理。"""
+    try:
+        path = _badge_path()
+        if not path.is_file() or path.stat().st_size > MAX_BADGE_BYTES:
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        sessions = data["sessions"]
+        now = time.time()
+        return {k: {"n": v["n"], "ts": float(v["ts"])} for k, v in sessions.items()
+                if isinstance(k, str) and isinstance(v, dict)
+                and isinstance(v.get("n"), int) and not isinstance(v.get("n"), bool) and v["n"] > 0
+                and _is_number(v.get("ts")) and now - float(v["ts"]) < BADGE_TTL_SECONDS}
+    except Exception:
+        return {}
+
+
+def save_badge(sessions: dict) -> None:
+    """原子写入（同目录临时文件 + os.replace，0600）。失败只记日志，不影响通知。"""
+    tmp = ""
+    try:
+        now = time.time()
+        sessions = {k: v for k, v in sessions.items() if now - v["ts"] < BADGE_TTL_SECONDS}
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, tmp = tempfile.mkstemp(dir=str(CONFIG_DIR), prefix=".badge-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"sessions": sessions}, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, _badge_path())
+    except Exception as e:
+        log("badge 写入失败: %s" % type(e).__name__, True)
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _session_key(payload: dict) -> str:
+    sid = payload.get("session_id")
+    return sid if isinstance(sid, str) else ""
+
+
+def badge_reset(session_id: str) -> None:
+    """清掉该会话的未读计数。没有记录时不写文件。"""
+    sessions = load_badge()
+    if session_id in sessions:
+        del sessions[session_id]
+        save_badge(sessions)
+
+
+def badge_bump(session_id: str) -> None:
+    # 并发的 hook 之间读-改-写没有加锁，可能丢一次累加；角标只是提示，可以接受
+    sessions = load_badge()
+    sessions[session_id] = {"n": sessions.get(session_id, {}).get("n", 0) + 1, "ts": time.time()}
+    save_badge(sessions)
+
+
 def cmd_hook(args) -> int:
     budget = Budget()
     watchdog = install_watchdog(HOOK_BUDGET_SECONDS)
@@ -1479,6 +1583,15 @@ def _run_hook(args, budget: Budget) -> int:
         log("hook payload 顶层不是对象，跳过推送", True)
         return 0
 
+    # 用户发了新消息 / 会话结束：该会话的未读清零。必须在读配置、解析 transcript、
+    # 任何网络请求之前完成，且这条路径**不能向 stdout 输出任何东西**
+    # （UserPromptSubmit 的 stdout 会被注入 Claude 的上下文）。
+    event = payload.get("hook_event_name")
+    if event in ("UserPromptSubmit", "SessionEnd") and not args.dry_run:
+        badge_reset(_session_key(payload))
+    if event == "UserPromptSubmit":
+        return 0
+
     cfg = apply_cli_override(load_config(payload.get("cwd")), args.webhook)
     debug = bool(cfg.get("debug"))
     log("hook event=%s raw=%s" % (payload.get("hook_event_name"), raw[:500]), debug)
@@ -1520,16 +1633,31 @@ def _run_hook(args, budget: Budget) -> int:
             send_timeout = max(5.0, float(cfg.get("timeout", 5)))
             recap_timeout = budget.remaining() - send_timeout - 5.0
             if recap_timeout > 0:
-                recap = generate_recap(recap_cfg, stats.get("user_prompt", ""),
-                                       stats.get("assistant_text", ""), recap_timeout)
+                started = time.monotonic()
+                recap, why = generate_recap(recap_cfg, stats.get("user_prompt", ""),
+                                            stats.get("assistant_text", ""), recap_timeout)
                 if recap:
                     stats = dict(stats, assistant_recap=recap)
+                    log("recap ok %.1fs" % (time.monotonic() - started), debug)
+                else:
+                    # 失败一律记录（原因是静态短语，不含密钥 / URL / 远端文本）
+                    log("recap FAIL: %s" % why, True)
+            else:
+                log("recap skip: 预算不足 剩余 %.1fs" % budget.remaining(), True)
 
     msg = build_hook_message(payload, cfg, stats, budget)
+    # 角标 = 该设备所有会话的未读条数 + 本条；发送成功后才把本会话的计数落盘
+    use_badge = (dest.get("channel") == "bark" and dest.get("badge") is not False)
+    session_key = _session_key(payload)
+    if use_badge:
+        msg.badge = sum(v["n"] for v in load_badge().values()) + 1
     # Reserve time for recap while retaining the configured notification timeout.
     timeout = budget.slice(max(0.1, float(cfg.get("timeout", 5))))
     sent, detail = post(dest, render(cfg, msg), timeout, hosts)
     log("send %s: %s" % ("ok" if sent else "FAIL", detail), debug or not sent)
+    if sent and use_badge and payload.get("hook_event_name") != "SessionEnd":
+        # SessionEnd 本身不累计：会话已经结束，没有后续的 UserPromptSubmit 来清零它
+        badge_bump(session_key)
     return 0
 
 
@@ -1609,6 +1737,8 @@ def cmd_doctor(args) -> int:
             # 凭据一律不回显；带 URL 的字段只显示协议和主机
             if key in ("webhook_url", "server") and isinstance(cfg.get(key), str):
                 shown = mask(cfg[key])
+            elif key in BOOL_DEST_FIELDS:
+                shown = "关闭" if cfg.get(key) is False else "开启"
             else:
                 shown = "已配置" if cfg.get(key) else (
                     "(未配置)" if key in channel.required else "未配置（可选）")

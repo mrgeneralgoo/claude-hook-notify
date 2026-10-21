@@ -8,6 +8,7 @@
 Bark 的渲染器会把标题、列表行尾的硬换行再算成一个空行，所以只在「文字行后面紧跟文字行」
 时补硬换行。APNs 负载上限 4KB，所以正文同时按字符数和 UTF-8 字节数截断。
 自建服务用 server 指定地址，并需要在用户配置的 allowed_hosts 里放行该主机。
+badge 是 App 图标上的未读计数，由上层按会话累计后放进 Message；目的地里写 "badge": false 可关闭。
 icon 是可选的通知图标地址，由 App 下载（iOS 15+），不经过本插件，所以不受 allowed_hosts 限制。
 """
 
@@ -25,6 +26,7 @@ FIELDS_PER_LINE = 2
 _KEY_RE = re.compile(r"[A-Za-z0-9]+")
 _ICON_RE = re.compile(r"https?://\S+")
 _BLOCK_RE = re.compile(r"\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|>)")
+_LABEL_RE = re.compile(r"\*\*[^*\n]+\*\*")
 
 
 def _is_text(line: str) -> bool:
@@ -47,6 +49,14 @@ def soft_breaks(text: str) -> str:
     return "\n".join(out)
 
 
+def space_block(block: str) -> str:
+    """分节标签（整行粗体）和它的内容之间空一行，手机上一眼分得清标签和正文。"""
+    head, sep, rest = block.strip().partition("\n")
+    if sep and _LABEL_RE.fullmatch(head.strip()):
+        return head + "\n\n" + rest.strip()
+    return block.strip()
+
+
 def fit_markdown(text: str, limit: int, max_bytes: int) -> str:
     """truncate_md 只按字符数截断；中文和 emoji 占多个字节，这里再逐步收紧到字节上限内。"""
     out = truncate_md(text, limit)
@@ -65,7 +75,7 @@ class BarkChannel(Channel):
     label = "Bark"
     default_hosts = ("api.day.app",)
     required = ("device_key",)
-    optional = ("server", "icon")
+    optional = ("server", "icon", "badge")
 
     def render(self, msg: Message) -> dict:
         title = truncate(md_to_plain(msg.title), 200).replace("\n", " ")
@@ -74,10 +84,16 @@ class BarkChannel(Channel):
         if msg.footer:
             meta.append(truncate(md_to_plain(msg.footer), 100))
         tail = soft_breaks(truncate("\n".join("> " + m.replace("\n", " ") for m in meta), MAX_TAIL))
-        body = fit_markdown(soft_breaks(msg.body.strip()), max(MAX_BODY - len(tail) - 2, 0),
+        # 分节之间、标签与内容之间都留一个空行，Bark 里才不会挤成一团；其余渠道仍用单换行的 body
+        text = ("\n\n".join(space_block(b) for b in msg.blocks if b.strip())
+                if msg.blocks else msg.body.strip())
+        body = fit_markdown(soft_breaks(text), max(MAX_BODY - len(tail) - 2, 0),
                             max(MAX_BODY_BYTES - len(tail.encode("utf-8")) - 2, 0))
-        return {"title": title, "markdown": "\n\n".join(p for p in (body, tail) if p),
-                "group": "Claude Code"}
+        out = {"title": title, "markdown": "\n\n".join(p for p in (body, tail) if p),
+               "group": "Claude Code"}
+        if isinstance(msg.badge, int) and not isinstance(msg.badge, bool) and msg.badge > 0:
+            out["badge"] = msg.badge
+        return out
 
     def request(self, dest: dict, body: dict) -> tuple[str, dict]:
         key = dest.get("device_key") or ""
@@ -86,6 +102,8 @@ class BarkChannel(Channel):
         server = dest.get("server") or DEFAULT_SERVER
         body = dict(body)
         body["device_key"] = key
+        if dest.get("badge") is False:
+            body.pop("badge", None)
         icon = dest.get("icon")
         if icon:
             if not isinstance(icon, str) or not _ICON_RE.fullmatch(icon):

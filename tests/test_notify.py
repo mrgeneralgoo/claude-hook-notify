@@ -428,7 +428,8 @@ class TestSessionName(unittest.TestCase):
         self.assertEqual(len(fields), 1, "只保留会话 ID —— 会话名已经在标题里")
         label, value = fields[0]
         self.assertEqual(label, "会话 ID")
-        self.assertIn("3f2a9c10-1111-2222-3333-444455556666", value)
+        self.assertIn("3f2a9c10", value)
+        self.assertNotIn("1111", value, "只展示前 8 位，完整 ID 在手机上会折行")
         # 飞书里与项目/分支/主机同排，不单独占一行
         self.assertTrue(ch_lark.field(label, value)["is_short"])
 
@@ -1662,7 +1663,7 @@ class TestEmptyTaskPlaceholder(unittest.TestCase):
         self.addCleanup(os.unlink, path)
         return path
 
-    def test_tagged_boundary_shows_neutral_placeholder(self):
+    def test_tagged_boundary_omits_task_section(self):
         path = self._write([
             {"type": "user", "timestamp": "2026-01-01T00:00:00.000Z", "userType": "external",
              "message": {"content": "上一轮敏感任务"}},
@@ -1674,11 +1675,12 @@ class TestEmptyTaskPlaceholder(unittest.TestCase):
         card = ln.build_hook_payload(
             {"hook_event_name": "Stop", "cwd": os.getcwd(), "transcript_path": path}, {})
         blob = json.dumps(card, ensure_ascii=False)
-        self.assertIn("由命令或系统事件触发", blob)
+        self.assertNotIn("由命令或系统事件触发", blob)
+        self.assertNotIn("本轮任务", blob)
         self.assertNotIn("敏感", blob)
         self.assertNotIn("task-notification", blob)
 
-    def test_attachment_only_turn_says_so(self):
+    def test_attachment_only_turn_omits_task_section(self):
         path = self._write([
             {"type": "user", "timestamp": "2026-01-01T00:00:00.000Z", "userType": "external",
              "message": {"content": [{"type": "image", "source": {"data": "x"}}]}},
@@ -1687,7 +1689,10 @@ class TestEmptyTaskPlaceholder(unittest.TestCase):
         ])
         card = ln.build_hook_payload(
             {"hook_event_name": "Stop", "cwd": os.getcwd(), "transcript_path": path}, {})
-        self.assertIn("图片或附件", json.dumps(card, ensure_ascii=False))
+        blob = json.dumps(card, ensure_ascii=False)
+        self.assertNotIn("图片或附件", blob)
+        self.assertNotIn("本轮任务", blob)
+        self.assertIn("看到了", blob)
 
     def test_placeholder_respects_include_summary_false(self):
         path = self._write([
@@ -2479,7 +2484,7 @@ class TestCardHasNoBlankLines(unittest.TestCase):
             {"hook_event_name": "Stop", "cwd": os.getcwd(), "transcript_path": path}, {}))
         self.assertNotIn("\n\n", body, "元素之间不该出现空行:\n%s" % body)
         # 内容仍然齐全
-        for expect in ("把登录接口改成 JWT", "已完成，12 个测试通过。", "本轮任务", "完成情况"):
+        for expect in ("把登录接口改成 JWT", "已完成，12 个测试通过。", "本轮任务", "回复原文"):
             self.assertIn(expect, body)
 
     def test_multiline_content_is_preserved(self):
@@ -2505,8 +2510,8 @@ class TestCardHasNoBlankLines(unittest.TestCase):
         ])
         body = self._body(ln.build_hook_payload(
             {"hook_event_name": "Stop", "cwd": os.getcwd(), "transcript_path": path}, {}))
-        self.assertIn("**Claude Code 已完成本轮任务**\n**📋 本轮任务**\n单行任务\n"
-                      "**📝 完成情况**\n单行回答\n", body, body)
+        self.assertTrue(body.startswith("**📝 回复原文**\n单行回答\n**📋 本轮任务**\n单行任务\n"), body)
+        self.assertNotIn("Claude Code 已完成本轮任务", body)
 
     def test_notification_card_body_has_no_double_newline(self):
         card = ln.build_hook_payload(

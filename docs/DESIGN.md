@@ -136,6 +136,16 @@ hook / send / doctor ──► Message ──► Channel.render ──► Channe
 只有事件过滤通过、摘要可展示、回复过长且通知目的地有效时才调用模型。预览模式和授权提醒不调用模型。
 生成失败沿用原来的截断通知，生成成功只替换通知里的回复文本，不改变事件状态或原始会话记录。
 
+### 未读角标与 UserPromptSubmit
+
+Bark 的 `badge` 是未读条数，状态存放在 `CONFIG_DIR/badge.json`（`{"sessions": {id: {n, ts}}}`，原子写入、0600、
+24 小时过期；损坏或过大按空处理）。只在发送成功后累计，并发 hook 之间不加锁，可能丢一次累加。
+清零由 `UserPromptSubmit` / `SessionEnd` 触发，发生在读配置之前。**UserPromptSubmit 的 stdout 会被注入 Claude 上下文**，
+所以该路径不读配置、不联网、不打印任何内容。`badge` 是目的地里唯一的 boolean 字段，校验时单独放行。
+
+通知正文按分节拆成 `Message.blocks`：Bark 用空行分节，其余渠道仍用单换行的 `body`。Stop / SubagentStop 把结果放在最前，
+结果标签标明来源（AI 摘要 / 回复原文 / 节选）；「本轮任务」压成单行纯文本，没有可展示文本时省略。
+
 ### 目的地校验
 
 - 必须是 `https`，且主机需在 `allowed_hosts` 内（默认只允许当前渠道的官方域名）。
