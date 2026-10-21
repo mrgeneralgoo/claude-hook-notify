@@ -19,15 +19,15 @@ from dataclasses import dataclass, field
 # 状态 → (图标, 中文)。颜色等视觉映射属于各渠道自己的事。
 # subtask / ended 只在 hook 内部使用，不对 send 的 -s 开放。
 STATUSES = {
-    "success": ("✅", "成功"),
-    "failed": ("❌", "失败"),
-    "running": ("⏳", "进行中"),
-    "decision": ("🤔", "待决策"),
-    "warning": ("⚠️", "警告"),
-    "error": ("⚠️", "异常"),
-    "info": ("💬", "信息"),
-    "subtask": ("📦", "子任务"),
-    "ended": ("👋", "结束"),
+    "success": ("🟢", "成功"),
+    "failed": ("🔴", "失败"),
+    "running": ("🔵", "进行中"),
+    "decision": ("🔴", "待决策"),
+    "warning": ("🟡", "警告"),
+    "error": ("🔴", "异常"),
+    "info": ("⚪", "信息"),
+    "subtask": ("🟣", "子任务"),
+    "ended": ("⚪", "结束"),
 }
 SEND_STATUSES = ("success", "failed", "running", "decision", "warning", "error", "info")
 
@@ -45,6 +45,9 @@ class Message:
     fields: list = field(default_factory=list)   # [(标签, 值), ...]，值可含行内 markdown
     footer: str = ""
     color: str = ""      # 渠道私有的颜色提示（目前只有 lark 认），其余渠道忽略
+    # body 按分节拆开的版本；需要分节留白的渠道（目前只有 bark）用它，其余渠道用 body
+    blocks: list = field(default_factory=list)
+    badge: int | None = None   # 未读计数，目前只有 bark 用
 
 
 class Channel:

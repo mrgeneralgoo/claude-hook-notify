@@ -15,7 +15,7 @@ STATUS_COLORS = {
     "success": "green",
     "failed": "red",
     "running": "blue",
-    "decision": "orange",
+    "decision": "red",
     "warning": "yellow",
     "error": "carmine",
     "info": "wathet",
