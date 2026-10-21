@@ -41,18 +41,18 @@ Example (Feishu card; other channels carry the same content in their own format)
 
 ```
 ┌────────────────────────────────────────────┐
-│ ✅ Task complete · Refactor login module   │  ← title is the session name
+│ 🟢 Task complete · Refactor login module   │  ← title is the session name
 ├────────────────────────────────────────────┤
-│ 📝 Original reply                          │
+│ Original reply                             │
 │ ## What changed                            │
 │ - Issue JWTs on login                      │
 │ - Added 12 tests                           │
-│ 📋 Task                                    │
+│ Task                                       │
 │ Switch the login API to JWT and add tests  │
-│ 🔧 19 tool calls · ⏱️ 6 min 31 s          │
+│ 19 tool calls · 6 min 31 s                 │
 ├────────────────────────────────────────────┤
 │ Project my-project     Branch feat/jwt     │
-│ Host dev-macbook       Session 3f2a9c10-…  │
+│ Host dev-macbook       Session 3f2a9c10    │
 ├────────────────────────────────────────────┤
 │ Claude Code · Stop · 2026-08-23 00:39      │
 └────────────────────────────────────────────┘
@@ -190,7 +190,7 @@ The key is sent as a Bearer token. The endpoint must support non-streaming `POST
 - Recaps apply only to eligible `Stop` / `SubagentStop` replies longer than 600 characters. The existing event filters and `include_summary` setting still apply. Short replies, permission prompts, manual sends, and `--dry-run` never call the model.
 - The request contains the current prompt, capped at 2,000 characters, and the last assistant reply. Replies over 12,000 characters retain their beginning and end with an omitted-middle marker. No tool logs or full conversation history are uploaded.
 - The model is asked for a same-language summary: a one-sentence conclusion plus at most 4 bullet points (changes, verification, risks, todos). Accepted output is capped at 500 characters. Notification status remains determined by the hook, not the model.
-- The result section label shows its source: `🤖 AI 摘要` (model-generated), `📝 回复原文` (original, not truncated), or `📝 回复原文（节选）` (original, truncated at 600 characters).
+- The result section label shows its source: `AI 摘要` (model-generated), `回复原文` (original, not truncated), or `回复原文 · 节选` (original, truncated at 600 characters).
 - A failed recap leaves `recap FAIL: <reason>` in the debug log (for example `HTTP 401`, `超时`, `finish_reason=length`) with no key, URL, or remote text; a skip due to low budget logs `recap skip`.
 - The recap request defaults to a 15-second wall-clock limit. The remaining hook budget may shorten it to reserve notification time and message-building time. No retries are made. Invalid settings, a missing key, malformed output, or request failure retain the original truncated reply.
 - Wall-clock enforcement uses Unix signal timers. If these are unavailable, recap is skipped and ordinary notification delivery continues.
@@ -257,9 +257,9 @@ If an explicitly configured source is broken (missing file, invalid JSON, unknow
 
 | Event | When | Notification | Enabled by default |
 |-------|------|--------------|:------------------:|
-| `Stop` | Claude finishes a turn | ✅ Task complete · ⏳ Background tasks still running (listed) | ✔ |
-| `Notification` | Claude needs permission, an MCP server asks a question, or it has been idle for 60 s (idle prompts are skipped when `Stop` is enabled) | 🔐 Permission needed · 🙋 Needs your answer · ⏳ Waiting for input | ✔ |
-| `SubagentStop` | A subagent finishes | 📦 Subtask complete | |
+| `Stop` | Claude finishes a turn | 🟢 Task complete · 🔵 Background tasks still running (listed) | ✔ |
+| `Notification` | Claude needs permission, an MCP server asks a question, or it has been idle for 60 s (idle prompts are skipped when `Stop` is enabled) | 🔴 Needs you (the first body line says which: permission, question, or waiting for your next instruction; sent as time-sensitive on Bark) | ✔ |
+| `SubagentStop` | A subagent finishes | 🟢 Subtask complete | |
 | `SessionEnd` | The session exits | 👋 Session ended | |
 
 All four hooks are registered by the plugin; `events` decides which ones send. Changing it takes effect immediately, without reinstalling.
@@ -283,7 +283,7 @@ python3 "$NOTIFY" send -t "Decision needed" -s decision -m "REST or GraphQL?"
 | Option | Description |
 |--------|-------------|
 | `-t, --title` | Title |
-| `-s, --status` | `success`, `failed`, `running`, `decision`, `warning`, `error`, or `info` (✅ ❌ ⏳ 🤔 ⚠️ ⚠️ 💬). Channels with color support also color by status. |
+| `-s, --status` | `success`, `failed`, `running`, `decision`, `warning`, `error`, or `info` (🟢 🔴 🔵 🔴 🟡 🔴 ⚪). Channels with color support also color by status. |
 | `-m, --message` | Body, in Markdown. Unsupported syntax is simplified per channel. |
 | `-d, --detail` | Extra details, shown below a divider |
 | `-c, --color` | Override the card color (Feishu only) |

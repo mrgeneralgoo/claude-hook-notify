@@ -44,16 +44,16 @@ python3 "$NOTIFY" send -t "标题" -s <状态> -m "正文" [-d "补充详情"]
 
 | 状态 | 显示 |
 |------|------|
-| `success` | ✅ 成功 |
-| `failed` | ❌ 失败 |
-| `running` | ⏳ 进行中 |
-| `decision` | 🤔 待决策 |
-| `warning` | ⚠️ 警告 |
-| `error` | ⚠️ 异常 |
-| `info` | 💬 信息 |
+| `success` | 🟢 成功 |
+| `failed` | 🔴 失败 |
+| `running` | 🔵 进行中 |
+| `decision` | 🔴 待决策 |
+| `warning` | 🟡 警告 |
+| `error` | 🔴 异常 |
+| `info` | ⚪ 信息 |
 
 通知**标题**会用当前会话名（来自 transcript 的 `ai-title` 记录），会话还没生成标题时退回项目名；
-正文下方自动附带项目名、Git 分支、主机名和完整 session ID（来自 `CLAUDE_CODE_SESSION_ID`）。
+正文下方自动附带项目名、Git 分支、主机名和 session ID 前 8 位（来自 `CLAUDE_CODE_SESSION_ID`）。
 这些都不需要手动填。只有在用户明确要求换个称呼、或要求不要暴露会话信息时，
 才用 `--session-name` / `--no-session` 覆盖。
 
