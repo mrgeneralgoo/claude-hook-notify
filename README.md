@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#requirements)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#requirements)
 
-A [Claude Code](https://code.claude.com) plugin that sends a notification when Claude finishes a task, needs your permission, or is waiting for input. Notifications can go to **Feishu / Lark, WeCom, DingTalk, Slack, Telegram, or Bark**.
+A notification plugin for [Claude Code](https://code.claude.com) and Codex. It sends task-completion and permission-request notifications to **Feishu / Lark, WeCom, DingTalk, Slack, Telegram, or Bark**. Claude Code also supports idle-input reminders.
 
 The notification content is generated once and is the same on every channel. Each channel only decides how to format and deliver it. Switching channels is a one-line config change.
 
@@ -18,6 +18,7 @@ The notification content is generated once and is the same on every channel. Eac
 - [Supported channels](#supported-channels)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Codex setup](#codex-setup)
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Security](#security)
@@ -29,9 +30,9 @@ The notification content is generated once and is the same on every channel. Eac
 ## Features
 
 - **Six channels, one config key.** Change `channel` and the same notification is delivered elsewhere.
-- **Automatic notifications** on task completion, permission requests, and idle prompts, via Claude Code hooks.
+- **Automatic notifications** on task completion and permission requests via Claude Code or Codex hooks; Claude Code also supports idle prompts.
 - **Manual notifications** through the bundled `notify` skill ("ping me when the migration is done") or the command line.
-- **Useful content.** The title is the session name, so parallel tasks in one project are easy to tell apart. The body includes your prompt, Claude's reply, tool-call count, duration, project, Git branch, host, and session ID.
+- **Useful content.** Claude notifications include the session name, prompt, reply, tool-call count, duration, project, Git branch, host, and session ID. Codex uses the fields available in its events; see [Codex setup](#codex-setup) for differences.
 - **Not noisy.** Event allowlist, quiet hours, and a minimum task duration filter.
 - **Zero dependencies.** Python standard library only — no `pip install`, no `jq`, no `curl`.
 - **Safe by default.** A repository's config file can never choose where your notifications go. See [Security](#security).
@@ -69,13 +70,13 @@ Example (Feishu card; other channels carry the same content in their own format)
 | `dingtalk` | DingTalk group bot | `webhook_url` | `secret` (signing) | Markdown |
 | `slack` | Slack incoming webhook | `webhook_url` | | Block Kit |
 | `telegram` | Telegram bot | `bot_token`, `chat_id` | | Plain text |
-| `bark` | Bark (iOS push) | `device_key` | `server` (self-hosted), `icon` (image URL, iOS 15+), `badge` (`false` disables the unread badge) | Push notification (Markdown body) |
+| `bark` | Bark (iOS push) | `device_key` | `server` (self-hosted), `icon` (image URL, iOS 15+) | Push notification (Markdown body) |
 
 Each channel may only send to its official host. To use a self-hosted Bark server or a proxy, add the host to `allowed_hosts` in your user config.
 
 ## Requirements
 
-- Claude Code with plugin support
+- Claude Code with plugin support, or a local Codex runtime (see [Codex setup](#codex-setup))
 - Python 3.9 or later (`python3` on `PATH`)
 - macOS or Linux. Windows is not supported yet.
 
@@ -139,6 +140,45 @@ python3 scripts/notify.py doctor --test
 
 `doctor` prints the active channel and where each setting came from; `--test` sends a test message. If it arrives, you are done.
 
+## Codex setup
+
+Codex integration uses native lifecycle hooks only. It does not occupy the `notify` callback in `config.toml` or require a forwarding script. All six channels and the trusted user config at `~/.config/claude-hook-notify/config.json` are shared with Claude, including `CLAUDE_HOOK_NOTIFY_CONFIG`.
+
+### Install native hooks
+
+From this repository checkout, install the local plugin with a Codex CLI that supports plugins and lifecycle hooks:
+
+```bash
+codex plugin marketplace add .
+codex plugin add claude-hook-notify@claude-hook-notify
+```
+
+Restart Codex, then review and trust the hooks using `/hooks` in the CLI or **Settings > Hooks** in the desktop app. The root `plugin.json` selects `hooks/codex.json`; the existing Claude manifest remains separate. The repository's `.claude-plugin/marketplace.json` also serves as a compatible local Codex catalog.
+
+| Codex event | Behavior | `events` setting |
+|-------------|----------|------------------|
+| `Stop` | Send the final reply | `Stop` (default) |
+| `PermissionRequest` | Request your attention; include the approval reason when summaries are enabled, never raw tool arguments | `Notification` (default) |
+| `SubagentStop` | Send the subagent's final reply | `SubagentStop` (opt in) |
+
+Adapters consume documented event fields without parsing unstable Codex transcript files or caching prompts. Native completion events provide the reply but not the original prompt, session title, elapsed time, or tool-call count. The task section is omitted and the title falls back to the project name. With `min_duration_seconds > 0`, completion notifications are skipped because duration is unknown; permission reminders still work. Continuation stops with `stop_hook_active: true` are skipped.
+
+### Project settings and verification
+
+Codex reads `.codex/notify.json`; Claude Code reads `.claude/notify.json`. The same restrictive merge rules apply, and neither file can supply credentials or a recap endpoint. Codex does not fall back to the Claude project file.
+
+```bash
+python3 scripts/notify.py doctor --source codex
+python3 scripts/notify.py send --source codex -t "Preview" -m "hello" --dry-run
+printf '%s\n' '{"hook_event_name":"Stop","session_id":"demo","cwd":"/tmp","last_assistant_message":"Hello"}' | python3 scripts/notify.py hook --source codex --dry-run
+```
+
+`send` and `doctor` infer the source from the harness session environment, or accept an explicit `--source`; Claude takes precedence when both Claude and Codex variables are set. Manual Codex sends use `CODEX_THREAD_ID` and accept `--session-name`. Native hooks always pass `--source codex` explicitly. Codex notifications use a `Codex` footer and Bark group.
+
+Both harnesses respect `include_summary`, quiet hours, channel validation, and optional recaps. `--dry-run` sends nothing and does not request a recap. Local command hooks require the scripts on the execution machine; installing a plugin in a cloud/web surface alone does not deploy them.
+
+Official references: [Codex hooks](https://learn.chatgpt.com/docs/hooks), [plugin packaging](https://developers.openai.com/plugins/build/plugins).
+
 ## Configuration
 
 The user config lives at `~/.config/claude-hook-notify/config.json`. A full example is in [config.example.json](config.example.json).
@@ -197,10 +237,6 @@ The key is sent as a Bearer token. The endpoint must support non-streaming `POST
 
 **Enabling recap sends conversation text to the selected model provider and may incur charges.** It is an additional destination, separate from your notification channel. Project configs cannot enable or override it. Summaries are lossy and do not provide full-text viewing.
 
-### Bark unread badge
-
-The red badge on the Bark app icon is an **unread count**: each successful push adds 1, and it resets when you send a new message in that session (`UserPromptSubmit`) or the session ends. The count lives in `~/.config/claude-hook-notify/badge.json` (sessions idle for 24 hours are dropped; concurrent hooks may occasionally miss one increment). To turn the badge off, set `"badge": false` on the Bark destination. `--dry-run`, `send` and `doctor` never increment it.
-
 ### Switching channels
 
 Change `channel` and its fields; everything else stays the same. To switch often, register several destinations and select one:
@@ -253,7 +289,7 @@ If an explicitly configured source is broken (missing file, invalid JSON, unknow
 
 ## Usage
 
-### Automatic notifications
+### Automatic notifications (Claude Code)
 
 | Event | When | Notification | Enabled by default |
 |-------|------|--------------|:------------------:|
@@ -362,9 +398,12 @@ python3 -m unittest discover -s tests -v
 ### Project layout
 
 ```
-scripts/notify.py              # hook / send / doctor commands, config loading, shared HTTPS sender
+scripts/notify.py              # hook / send / doctor, config loading, shared HTTPS sender
+scripts/notify_harnesses/      # harness contract, Claude/Codex adapters, registry factory
 scripts/notify_channels/       # one module per channel, plus the Message/Channel contract (base.py)
-skills/notify/SKILL.md         # the skill Claude uses to send notifications
+skills/notify/SKILL.md         # the skill Claude and Codex use to send notifications
+plugin.json                   # Codex-compatible portable plugin manifest
+hooks/codex.json              # Codex lifecycle hooks
 .claude-plugin/plugin.json     # plugin manifest and hook registration
 docs/DESIGN.md                 # design notes (Chinese)
 ```
@@ -381,6 +420,10 @@ docs/DESIGN.md                 # design notes (Chinese)
 The new channel's credential fields are automatically excluded from project configs. HTTP, timeouts, and error redaction are handled by `notify.post()`.
 
 Issues and pull requests are welcome. Please include a regression test with each change. See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+### Add a harness
+
+Implement the `Harness` contract in `scripts/notify_harnesses/` and add the adapter to the registry. Adapters own event normalization, session information, configuration locations, and source identity. Filtering, recaps, and delivery stay shared. Select the harness with `--source` without adding source-name branches to the main pipeline. Package native hook registrations according to the host's requirements and add event-to-message contract tests.
 
 ## License
 

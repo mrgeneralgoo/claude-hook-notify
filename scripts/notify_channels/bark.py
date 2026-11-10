@@ -8,7 +8,6 @@
 Bark 的渲染器会把标题、列表行尾的硬换行再算成一个空行，所以只在「文字行后面紧跟文字行」
 时补硬换行。APNs 负载上限 4KB，所以正文同时按字符数和 UTF-8 字节数截断。
 自建服务用 server 指定地址，并需要在用户配置的 allowed_hosts 里放行该主机。
-badge 是 App 图标上的未读计数，由上层按会话累计后放进 Message；目的地里写 "badge": false 可关闭。
 icon 是可选的通知图标地址，由 App 下载（iOS 15+），不经过本插件，所以不受 allowed_hosts 限制。
 """
 
@@ -75,7 +74,7 @@ class BarkChannel(Channel):
     label = "Bark"
     default_hosts = ("api.day.app",)
     required = ("device_key",)
-    optional = ("server", "icon", "badge")
+    optional = ("server", "icon")
 
     def render(self, msg: Message) -> dict:
         title = truncate(md_to_plain(msg.title), 200).replace("\n", " ")
@@ -90,12 +89,10 @@ class BarkChannel(Channel):
         body = fit_markdown(soft_breaks(text), max(MAX_BODY - len(tail) - 2, 0),
                             max(MAX_BODY_BYTES - len(tail.encode("utf-8")) - 2, 0))
         out = {"title": title, "markdown": "\n\n".join(p for p in (body, tail) if p),
-               "group": "Claude Code"}
+               "group": msg.source}
         if msg.status == "decision":
             # 等你处理：时效性通知，专注模式下也会亮屏提醒，在锁屏上更醒目
             out["level"] = "timeSensitive"
-        if isinstance(msg.badge, int) and not isinstance(msg.badge, bool) and msg.badge > 0:
-            out["badge"] = msg.badge
         return out
 
     def request(self, dest: dict, body: dict) -> tuple[str, dict]:
@@ -105,8 +102,6 @@ class BarkChannel(Channel):
         server = dest.get("server") or DEFAULT_SERVER
         body = dict(body)
         body["device_key"] = key
-        if dest.get("badge") is False:
-            body.pop("badge", None)
         icon = dest.get("icon")
         if icon:
             if not isinstance(icon, str) or not _ICON_RE.fullmatch(icon):

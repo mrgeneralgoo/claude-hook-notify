@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""0.5.0：结果分节的来源标签与顺序、Bark 分节留白、未读角标、recap 失败日志。"""
+"""0.5.0：结果分节的来源标签与顺序、Bark 分节留白、recap 失败日志。"""
 
 import contextlib
 import io
@@ -17,7 +17,7 @@ import notify as ln  # noqa: E402
 from notify_channels import bark  # noqa: E402
 from notify_channels.base import Message  # noqa: E402
 
-BARK_CFG = {"channel": "bark", "device_key": "abc123", "events": ["Stop", "UserPromptSubmit"]}
+BARK_CFG = {"channel": "bark", "device_key": "abc123", "events": ["Stop"]}
 
 
 def stats_for(**kw):
@@ -89,11 +89,10 @@ class TestResultLabelsAndOrder(unittest.TestCase):
 
 
 class TestBarkRender(unittest.TestCase):
-    def test_blocks_separated_by_blank_lines_and_badge(self):
-        msg = Message(title="t", body="a\nb", blocks=["**A**\nx", "**B**\ny"], badge=3)
+    def test_blocks_separated_by_blank_lines(self):
+        msg = Message(title="t", body="a\nb", blocks=["**A**\nx", "**B**\ny"])
         out = bark.CHANNEL.render(msg)
         self.assertIn("**A**\n\nx\n\n**B**\n\ny", out["markdown"].replace("  \n", "\n"))
-        self.assertEqual(out["badge"], 3)
 
     def test_label_spacing_only_for_whole_line_bold(self):
         self.assertEqual(bark.space_block("**A**\nx\n- y"), "**A**\n\nx\n- y")
@@ -126,141 +125,52 @@ class TestBarkRender(unittest.TestCase):
         self.assertTrue(msg.title.startswith("🟢 子任务完成"), msg.title)
         self.assertEqual(msg.status, "success")
 
-    def test_badge_only_when_positive_int(self):
-        for value in (None, 0, -1, True, "3"):
-            self.assertNotIn("badge", bark.CHANNEL.render(Message(title="t", badge=value)))
-
     def test_without_blocks_uses_body(self):
         self.assertIn("plain", bark.CHANNEL.render(Message(title="t", body="plain"))["markdown"])
 
-    def test_destination_badge_false_drops_badge(self):
-        body = bark.CHANNEL.render(Message(title="t", badge=2))
-        _, kept = bark.CHANNEL.request({"device_key": "abc"}, body)
-        _, dropped = bark.CHANNEL.request({"device_key": "abc", "badge": False}, body)
-        self.assertEqual(kept["badge"], 2)
-        self.assertNotIn("badge", dropped)
 
-    def test_bool_badge_passes_validation(self):
-        cfg = dict(BARK_CFG, badge=False)
-        warnings = []
-        ln.validate_credentials(cfg, warnings)
-        self.assertEqual(warnings, [])
-        self.assertNotIn("_fatal", cfg)
-        ok, why, _, body = ln.prepare_request(cfg, {"badge": 1}, ("api.day.app",))
-        self.assertTrue(ok, why)
-        self.assertNotIn("badge", body)
-        warnings = []
-        ln.validate_credentials(dict(BARK_CFG, badge="no"), warnings)
-        self.assertEqual(len(warnings), 1)
+class TestStatelessNotifications(unittest.TestCase):
+    def test_legacy_badge_setting_is_ignored(self):
+        for value in (True, False, "old-setting", 3):
+            with self.subTest(value=value):
+                cfg = dict(BARK_CFG, badge=value)
+                warnings = []
+                ln.validate_credentials(cfg, warnings)
+                self.assertEqual(warnings, [])
+                dest = ln.destination(cfg)
+                self.assertNotIn("badge", dest)
+                body = bark.CHANNEL.render(Message(title="t"))
+                ok, why, _, request = ln.prepare_request(dest, body, ("api.day.app",))
+                self.assertTrue(ok, why)
+                self.assertNotIn("badge", request)
 
-
-class TestBadgeState(unittest.TestCase):
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.dir = Path(tmp.name)
-        for p in (patch.object(ln, "CONFIG_DIR", self.dir),
-                  patch.object(ln, "LOG_PATH", self.dir / "debug.log")):
-            p.start()
-            self.addCleanup(p.stop)
-        self.path = self.dir / "badge.json"
-
-    def run_hook(self, payload, cfg=None, sent=(True, "ok"), extra_args=()):
-        args = ln.build_parser().parse_args(["hook", *extra_args])
-        out = io.StringIO()
-        cfg = dict(BARK_CFG if cfg is None else cfg)
-        with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
-                contextlib.redirect_stdout(out), \
-                patch.object(ln, "load_config", return_value=cfg), \
-                patch.object(ln, "parse_for_event", return_value=stats_for()), \
-                patch.object(ln, "git_info", return_value={}), \
-                patch.object(ln, "post", return_value=sent) as post:
-            rc = ln.cmd_hook(args)
-        return rc, out.getvalue(), post
-
-    def stop(self, sid="s1"):
-        return {"hook_event_name": "Stop", "session_id": sid, "cwd": os.getcwd()}
-
-    def n(self, sid="s1"):
-        return json.loads(self.path.read_text())["sessions"][sid]["n"]
-
-    def test_increments_on_success_and_total_is_sent(self):
-        _, _, post = self.run_hook(self.stop())
-        self.assertEqual(post.call_args.args[1]["badge"], 1)
-        _, _, post = self.run_hook(self.stop("s2"))
-        self.assertEqual(post.call_args.args[1]["badge"], 2)
-        _, _, post = self.run_hook(self.stop())
-        self.assertEqual(post.call_args.args[1]["badge"], 3)
-        self.assertEqual((self.n("s1"), self.n("s2")), (2, 1))
-        self.assertEqual(oct(self.path.stat().st_mode & 0o777), "0o600")
-
-    def test_failed_send_does_not_increment(self):
-        self.run_hook(self.stop(), sent=(False, "HTTP 500"))
-        self.assertFalse(self.path.exists())
-
-    def test_dry_run_does_not_increment(self):
-        self.run_hook(self.stop(), extra_args=("--dry-run",))
-        self.assertFalse(self.path.exists())
-
-    def test_opt_out_does_not_count(self):
-        _, _, post = self.run_hook(self.stop(), cfg=dict(BARK_CFG, badge=False))
-        self.assertNotIn("badge", post.call_args.args[1])
-        self.assertFalse(self.path.exists())
-
-    def test_non_bark_channel_has_no_badge(self):
-        cfg = {"webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/x"}
-        _, _, post = self.run_hook(self.stop(), cfg=cfg)
-        self.assertNotIn("badge", json.dumps(post.call_args.args[1]))
-        self.assertFalse(self.path.exists())
-
-    def test_session_without_id_uses_empty_key(self):
-        self.run_hook({"hook_event_name": "Stop", "cwd": os.getcwd()})
-        self.assertEqual(self.n(""), 1)
-
-    def test_user_prompt_submit_resets_silently(self):
-        self.run_hook(self.stop())
-        self.run_hook(self.stop("s2"))
-        with patch.object(ln, "load_config", side_effect=AssertionError("no config")), \
-                patch.object(ln, "post", side_effect=AssertionError("no network")):
-            args = ln.build_parser().parse_args(["hook"])
-            out = io.StringIO()
-            with patch.object(sys, "stdin", io.StringIO(json.dumps(
-                    {"hook_event_name": "UserPromptSubmit", "session_id": "s1"}))), \
-                    contextlib.redirect_stdout(out):
-                rc = ln.cmd_hook(args)
-        self.assertEqual((rc, out.getvalue()), (0, ""))
-        sessions = json.loads(self.path.read_text())["sessions"]
-        self.assertEqual(list(sessions), ["s2"])
-
-    def test_user_prompt_submit_dry_run_prints_nothing(self):
-        _, out, post = self.run_hook({"hook_event_name": "UserPromptSubmit", "session_id": "s1"},
-                                     extra_args=("--dry-run",))
-        self.assertEqual(out, "")
-        post.assert_not_called()
-
-    def test_session_end_resets_session(self):
-        self.run_hook(self.stop())
-        cfg = dict(BARK_CFG, events=["Stop"])    # SessionEnd 被事件过滤掉，但仍要清零
-        self.run_hook({"hook_event_name": "SessionEnd", "session_id": "s1"}, cfg=cfg)
-        self.assertEqual(json.loads(self.path.read_text())["sessions"], {})
-
-    def test_corrupt_or_oversized_file_is_empty(self):
-        for content in ("{broken", "[]", '{"sessions": 3}', '{"sessions": {"a": {"n": "x"}}}',
-                        '{"sessions": {"a": {"n": 1, "ts": 1}}}',
-                        " " * (ln.MAX_BADGE_BYTES + 1)):
-            with self.subTest(content=content[:20]):
-                self.path.write_text(content)
-                self.assertEqual(ln.load_badge(), {})
-        self.path.write_text("{broken")
-        _, _, post = self.run_hook(self.stop())
-        self.assertEqual(post.call_args.args[1]["badge"], 1)
-
-    def test_old_entries_are_dropped_on_write(self):
-        old = time.time() - ln.BADGE_TTL_SECONDS - 10
-        self.path.write_text(json.dumps({"sessions": {
-            "old": {"n": 5, "ts": old}, "new": {"n": 1, "ts": time.time()}}}))
-        self.run_hook(self.stop())
-        self.assertEqual(sorted(json.loads(self.path.read_text())["sessions"]), ["new", "s1"])
+    def test_hooks_do_not_create_or_modify_local_count_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / "badge.json"
+            for source in ("claude", "codex"):
+                for existing in (False, True):
+                    with self.subTest(source=source, existing=existing):
+                        if existing:
+                            state.write_text("old unread state")
+                        elif state.exists():
+                            state.unlink()
+                        payload = {"hook_event_name": "Stop", "session_id": "thread",
+                                   "cwd": temp, "last_assistant_message": "Done"}
+                        args = ln.build_parser().parse_args(["hook", "--source", source])
+                        with patch.object(ln, "CONFIG_DIR", root), \
+                                patch.object(ln, "load_config", return_value=dict(BARK_CFG, badge=True)), \
+                                patch.object(ln, "parse_for_event", return_value=stats_for()), \
+                                patch.object(ln, "git_info", return_value={}), \
+                                patch.object(ln, "log"), \
+                                patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                                patch.object(ln, "post", return_value=(True, "ok")) as post:
+                            self.assertEqual(ln.cmd_hook(args), 0)
+                        self.assertNotIn("badge", post.call_args.args[1])
+                        self.assertEqual(sorted(p.name for p in root.iterdir()),
+                                         ["badge.json"] if existing else [])
+                        if existing:
+                            self.assertEqual(state.read_text(), "old unread state")
 
 
 class TestRecapLogging(unittest.TestCase):

@@ -47,7 +47,7 @@ class Message:
     color: str = ""      # 渠道私有的颜色提示（目前只有 lark 认），其余渠道忽略
     # body 按分节拆开的版本；需要分节留白的渠道（目前只有 bark）用它，其余渠道用 body
     blocks: list = field(default_factory=list)
-    badge: int | None = None   # 未读计数，目前只有 bark 用
+    source: str = "Claude Code"   # 宿主名称，目前用于 Bark 分组
 
 
 class Channel:

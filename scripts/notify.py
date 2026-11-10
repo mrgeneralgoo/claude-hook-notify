@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""claude-hook-notify —— 把 Claude Code 的事件推送到飞书、企业微信、钉钉、Slack、Telegram、Bark。
+"""claude-hook-notify —— 把 Claude Code / Codex 的事件推送到飞书、企业微信、钉钉、Slack、Telegram、Bark。
 
 零第三方依赖，只使用 Python 标准库。
 
 三个子命令：
-  hook    从 stdin 读取 Claude Code hook 事件 JSON，组装通知并推送
+  hook    从 stdin 读取 Claude Code / Codex hook 事件 JSON，组装通知并推送
   send    手动发送一条通知（供 skill、脚本或命令行调用）
   doctor  检查配置是否可用，可选发送一条测试消息
 
@@ -15,7 +15,7 @@ notify_channels/ 下的各个模块里，换渠道只改配置里的 "channel"�
 配置查找顺序（后者覆盖前者）：
   1. 用户级 ~/.config/claude-hook-notify/config.json
   2. 环境变量 CLAUDE_HOOK_NOTIFY_CONFIG 指向的 JSON 文件
-  3. 项目内 <cwd>/.claude/notify.json（只能收窄行为、按名字引用目的地）
+  3. 项目内 <cwd>/<宿主配置目录>/notify.json（只能收窄行为、按名字引用目的地）
   4. 环境变量 LARK_WEBHOOK_URL / FEISHU_WEBHOOK_URL
   5. 命令行 --webhook
 旧版 claude-hook-lark 的路径与环境变量仍会作为后备读取。
@@ -34,7 +34,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -47,6 +46,9 @@ from notify_channels import (
     destination_fields, get_channel,
 )
 from notify_channels.base import md_to_plain
+from notify_harnesses import DEFAULT_HARNESS, HARNESSES, Harness, get_harness
+from notify_harnesses.base import reset_turn_state
+from notify_harnesses.claude import transcript_for
 from notify_recap import generate as generate_recap
 
 CONFIG_DIR = Path.home() / ".config" / "claude-hook-notify"
@@ -58,7 +60,6 @@ LEGACY_CONFIG_PATH = Path.home() / ".config" / "claude-hook-lark" / "config.json
 CONFIG_ENV = "CLAUDE_HOOK_NOTIFY_CONFIG"
 LEGACY_CONFIG_ENV = "CLAUDE_HOOK_LARK_CONFIG"
 PROJECT_CONFIG_NAME = "notify.json"
-LEGACY_PROJECT_CONFIG_NAME = "lark.json"
 
 DEFAULT_EVENTS = ["Stop", "Notification"]
 MAX_SUMMARY_CHARS = 600
@@ -74,7 +75,7 @@ MAX_TRANSCRIPT_BYTES = 16 << 20    # 只读尾部 16 MiB，够覆盖最近若干
 # 默认渠道（飞书）的官方域名。每个渠道各有自己的 default_hosts。
 DEFAULT_ALLOWED_HOSTS = CHANNELS[DEFAULT_CHANNEL].default_hosts
 
-# 仓库里的 .claude/notify.json 只能收窄行为，不能指定「发到哪」。
+# 仓库里的宿主项目配置只能收窄行为，不能指定「发到哪」。
 # "webhook" 是具名选择器的旧名，"destination" 是新名，两者等价。
 PROJECT_SAFE_KEYS = frozenset({
     "webhook", "destination", "events", "include_summary", "min_duration_seconds",
@@ -82,8 +83,6 @@ PROJECT_SAFE_KEYS = frozenset({
 })
 # 目的地字段：各渠道的凭据字段并集，加上渠道选择、主机白名单和具名表
 DEST_FIELDS = destination_fields()
-# 目的地里取值是 boolean 而不是字符串的字段（目前只有 bark 的 badge 开关）
-BOOL_DEST_FIELDS = frozenset({"badge"})
 DESTINATION_KEYS = DEST_FIELDS | {"channel", "allowed_hosts", "webhooks", "destinations"}
 
 
@@ -266,15 +265,18 @@ def _clear_destination(cfg: dict) -> None:
         cfg.pop(key, None)
 
 
-def load_config(cwd: str | None = None) -> dict:
+def load_config(cwd: str | None = None, source: str = DEFAULT_HARNESS) -> dict:
     """按信任级别装配配置。
 
     信任模型：**通知目的地只能来自用户自己掌握的位置** —— 环境变量、
     ~/.config/claude-hook-notify/config.json、或 CLAUDE_HOOK_NOTIFY_CONFIG 指向的文件。
-    仓库里的 <cwd>/.claude/notify.json 会随克隆进入机器，因此只允许它
+    仓库里的宿主项目配置会随克隆进入机器，因此只允许它
     收窄行为（开关事件、静默时段等），或用 "destination" 字段**按名字**引用
     用户配置里已登记的目的地，绝不能自带 URL、令牌或渠道。
     """
+    harness = get_harness(source)
+    if harness is None:
+        return {"_fatal": "未知的事件来源，已停止发送。", "_warnings": []}
     cfg: dict = {}
     warnings: list[str] = []
     registry: dict = {}     # 具名目的地只从可信来源累积
@@ -319,11 +321,11 @@ def load_config(cwd: str | None = None) -> dict:
                 registry.update(data["webhooks"])
             cfg["_source"] = "%s (%s)" % (explicit, env_name)
 
-    # 3) 项目级配置（不可信：只取安全键）。notify.json 不存在时退回旧名 lark.json
-    claude_dir = Path(cwd or os.getcwd()) / ".claude"
-    project_path = claude_dir / PROJECT_CONFIG_NAME
-    if not os.path.lexists(str(project_path)):
-        project_path = claude_dir / LEGACY_PROJECT_CONFIG_NAME
+    # 3) 宿主指定项目配置目录；信任规则仍由公共配置层统一执行。
+    project_dir = Path(cwd or os.getcwd()) / harness.project_dir
+    project_path = project_dir / PROJECT_CONFIG_NAME
+    if harness.legacy_project_config and not os.path.lexists(str(project_path)):
+        project_path = project_dir / harness.legacy_project_config
     # allow_symlink=False：这是不可信来源，不能跟随符号链接到特殊文件
     project_cfg, err = read_json_file(project_path, allow_symlink=False)
     if err:
@@ -426,10 +428,7 @@ def validate_credentials(cfg: dict, warnings: list) -> None:
     （最高优先级）给了正确地址时，通知本该正常发出，却因为早先写下的 _fatal
     被跳过 —— 而且这个行为还取决于「项目配置存不存在」，因为那才会触发早校验。
     """
-    if "badge" in cfg and not isinstance(cfg["badge"], bool):
-        warnings.append("badge 必须是 true 或 false（当前是 %s），已按默认（开启）处理。"
-                        % _type_name(cfg["badge"]))
-    for key in sorted(DEST_FIELDS - BOOL_DEST_FIELDS):
+    for key in sorted(DEST_FIELDS):
         if key in cfg and not isinstance(cfg[key], str):
             msg = "%s 必须是字符串（当前是 %s），已停止发送。" % (key, _type_name(cfg[key]))
             warnings.append(msg)
@@ -725,7 +724,7 @@ def prepare_request(dest: dict, payload: dict, hosts: tuple | None = None):
     if channel is None:
         return False, "未知的通知渠道", "", {}
     for key in channel.dest_keys:
-        if key in dest and key not in BOOL_DEST_FIELDS and not isinstance(dest[key], str):
+        if key in dest and not isinstance(dest[key], str):
             return False, "%s 必须是字符串" % key, "", {}
     missing = [k for k in channel.required if not dest.get(k)]
     if missing:
@@ -847,62 +846,17 @@ def parse_ts(value) -> float | None:
         return None
 
 
-def reset_turn_state(stats: dict) -> None:
-    """断开一轮：任务、回答、工具计数、起始时间、轮次性质一起清掉。
-
-    earliest_ts 也必须清掉，否则耗时下界会横跨边界之前的时间：
-    「文件很早开始 → 中间损坏 → 之后一个 3 秒的短轮次」会算出好几小时的下界，
-    反而让短任务通过 min_duration_seconds。清空后由边界之后的第一条记录重新播种。
-    """
-    stats["user_prompt"] = ""
-    stats["assistant_text"] = ""
-    stats["tool_calls"] = 0
-    stats["turn_start"] = None
-    stats["turn_kind"] = ""
-    stats["earliest_ts"] = None
+def payload_harness(payload: dict) -> Harness:
+    """读取入口已确定的宿主；旧调用省略来源时沿用默认宿主。"""
+    harness = get_harness(payload.get("_source", DEFAULT_HARNESS))
+    if harness is None:
+        raise ValueError("未知的事件来源")
+    return harness
 
 
 def parse_for_event(payload: dict) -> dict:
-    """按事件作用域解析 transcript，并标注摘要是否可信。
-
-    SubagentStop 缺少 agent_transcript_path 时，只能退回父文件，但父文件里
-    **多个并发 subagent 的 sidechain 记录是交错的**，没有可靠的身份字段能把它们
-    分开 —— 「A 提问、B 提问、A 回答」会被拼成「B 的任务 + A 的回答」，
-    既是错误归因，也可能把另一个子任务的内容带出去。
-    这种情况下只取元数据（会话名、分支），不出摘要。
-    """
-    event = payload.get("hook_event_name") or "Stop"
-    if event == "SubagentStop":
-        agent_path = (payload.get("agent_transcript_path")
-                      or payload.get("agentTranscriptPath") or "")
-        if agent_path:
-            stats = parse_transcript(agent_path, sidechain=True)
-            stats["summary_reliable"] = True
-            return stats
-        stats = parse_transcript(payload.get("transcript_path", ""), sidechain=False)
-        reset_turn_state(stats)
-        stats["summary_reliable"] = False
-        return stats
-    stats = parse_transcript(payload.get("transcript_path", ""), sidechain=False)
-    stats["summary_reliable"] = True
-    return stats
-
-
-def transcript_for(payload: dict) -> tuple[str, bool]:
-    """选出该事件应该解析哪份 transcript，以及是否按 subagent 作用域解析。
-
-    SubagentStop 的 payload 会带 agent_transcript_path，里面的记录都是
-    isSidechain=true。主链解析会跳过它们，所以子任务卡片必须换个作用域读，
-    否则拿不到子任务的输入、回答、工具数和耗时，反而可能显示父链的旧摘要。
-    """
-    if (payload.get("hook_event_name") or "") == "SubagentStop":
-        agent_path = (payload.get("agent_transcript_path")
-                      or payload.get("agentTranscriptPath") or "")
-        if agent_path:
-            return agent_path, True
-        # 没给专属文件时退回主文件，但仍按 subagent 作用域读
-        return payload.get("transcript_path", ""), True
-    return payload.get("transcript_path", ""), False
+    """由宿主选择事件统计的来源与作用域。"""
+    return payload_harness(payload).parse_stats(payload, parse_transcript)
 
 
 def parse_transcript(path: str, sidechain: bool = False) -> dict:
@@ -1078,21 +1032,9 @@ def find_transcript(session_id: str) -> str:
 
 
 def session_context(payload: dict | None = None, stats: dict | None = None) -> tuple[str, str]:
-    """返回 (session_id, session_name)，任一项取不到就是空串。"""
+    """返回宿主提供的 (session_id, session_name)。"""
     payload = payload or {}
-    session_id = (
-        payload.get("session_id")
-        or payload.get("sessionId")
-        or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-        or (stats or {}).get("session_id", "")
-    )
-    session_name = (stats or {}).get("session_name", "")
-    if not session_name and session_id:
-        # send 模式：没有现成 stats，按 session id 找回 transcript 读会话名
-        path = payload.get("transcript_path") or find_transcript(session_id)
-        if path:
-            session_name = parse_transcript(path).get("session_name", "")
-    return session_id, session_name
+    return payload_harness(payload).session_context(payload, stats, parse_transcript, find_transcript)
 
 
 MAX_SUBJECT_CHARS = 40
@@ -1253,12 +1195,15 @@ def notification_type(payload: dict) -> str:
 
 def event_style(event_name: str, payload: dict) -> tuple[str, str, str]:
     """返回 (标题前缀, 状态, 正文标题)。状态如何上色由各渠道自己决定。"""
+    harness = payload_harness(payload)
+    client = harness.label
     if event_name == "Stop":
         pending = pending_background_tasks(payload)
         if pending:
             return ("🔵 后台运行中", "running",
-                    "**本轮已结束，%d 个后台任务仍在运行，完成后 Claude 会继续**" % len(pending))
-        return "🟢 任务完成", "success", "**Claude Code 已完成本轮任务**"
+                    "**本轮已结束，%d 个后台任务仍在运行，完成后 %s 会继续**"
+                    % (len(pending), harness.continuation_label or client))
+        return "🟢 任务完成", "success", "**%s 已完成本轮任务**" % client
     if event_name == "SubagentStop":
         # 对用户来说子任务完成和任务完成是同一类（去看结果）：同一种颜色，标题仍写明是子任务
         return "🟢 子任务完成", "success", "**子任务执行完成**"
@@ -1275,10 +1220,10 @@ def event_style(event_name: str, payload: dict) -> tuple[str, str, str]:
             return "🔴 等你处理", "decision", "**在等你回答**"
         return "🔴 等你处理", "decision", "**在等你的下一步指示**"
     if event_name == "SessionEnd":
-        return "⚪ 会话结束", "ended", "**Claude Code 会话已结束**"
+        return "⚪ 会话结束", "ended", "**%s 会话已结束**" % client
     if event_name == "SessionStart":
-        return "🔵 会话开始", "running", "**Claude Code 会话已启动**"
-    return "⚪ Claude Code", "running", "**状态更新**"
+        return "🔵 会话开始", "running", "**%s 会话已启动**" % client
+    return "⚪ %s" % client, "running", "**状态更新**"
 
 
 _LIST_MARK_RE = re.compile(r"^(?:>\s*)*(?:[-*+]\s+|\d+[.)]\s+)?")
@@ -1309,13 +1254,14 @@ def build_hook_payload(payload: dict, cfg: dict, stats: dict | None = None,
 def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
                        budget: "Budget | None" = None) -> Message:
     """组装本次事件的通知内容。与渠道无关：换渠道时这里产出的内容不变。"""
+    harness = payload_harness(payload)
     event_name = payload.get("hook_event_name") or "Stop"
     cwd = payload.get("cwd") or os.getcwd()
     git = git_info(cwd, budget)
     prefix, status, headline = event_style(event_name, payload)
     name = project_name(cwd, git)
 
-    # 无论是否输出摘要都要读一次 transcript —— 会话名只存在于其中
+    # 宿主负责提取统计与会话名；公共层不假设其存储方式。
     if stats is None:
         stats = parse_for_event(payload)
     session_id, session_name = session_context(payload, stats)
@@ -1325,7 +1271,8 @@ def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
     extra = []                  # 紧跟标题行的事件信息（通知正文、结束原因）
     # 等待输入的原文（Claude is waiting for your input）和正文标题重复，不再列出
     if (event_name == "Notification" and payload.get("message")
-            and notification_type(payload) != "idle_prompt"):
+            and notification_type(payload) != "idle_prompt"
+            and (not harness.permission_details_require_summary or summary_enabled(cfg))):
         extra.append("%s" % truncate(payload["message"], 300))
 
     tasks_block = ""
@@ -1384,12 +1331,14 @@ def build_hook_message(payload: dict, cfg: dict, stats: dict | None = None,
     ]
     fields.extend(session_fields(session_id))
 
-    footer = "Claude Code · %s · %s" % (
-        event_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    footer = "%s · %s · %s" % (
+        harness.label,
+        payload.get("_event_name", event_name), datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     return Message(title="%s · %s" % (prefix, card_subject(session_name, name)),
                    body="\n".join(lines), status=status, fields=fields, footer=footer,
-                   blocks=list(lines))
+                   blocks=list(lines),
+                   source=harness.label)
 
 
 def duration_lower_bound(stats: dict) -> float | None:
@@ -1473,72 +1422,17 @@ def should_notify(payload: dict, cfg: dict, stats: dict | None = None) -> tuple[
     return True, ""
 
 
-# ── 未读计数（bark 图标角标）─────────────────────────────────────────
-
-BADGE_TTL_SECONDS = 24 * 3600
-MAX_BADGE_BYTES = 64 << 10
-
-
-def _badge_path() -> Path:
-    return CONFIG_DIR / "badge.json"
-
-
-def load_badge() -> dict:
-    """读取 {session_id: {"n": 条数, "ts": 时间戳}}。文件缺失、损坏、过大或结构不对都按空处理。"""
-    try:
-        path = _badge_path()
-        if not path.is_file() or path.stat().st_size > MAX_BADGE_BYTES:
-            return {}
-        data = json.loads(path.read_text(encoding="utf-8"))
-        sessions = data["sessions"]
-        now = time.time()
-        return {k: {"n": v["n"], "ts": float(v["ts"])} for k, v in sessions.items()
-                if isinstance(k, str) and isinstance(v, dict)
-                and isinstance(v.get("n"), int) and not isinstance(v.get("n"), bool) and v["n"] > 0
-                and _is_number(v.get("ts")) and now - float(v["ts"]) < BADGE_TTL_SECONDS}
-    except Exception:
-        return {}
-
-
-def save_badge(sessions: dict) -> None:
-    """原子写入（同目录临时文件 + os.replace，0600）。失败只记日志，不影响通知。"""
-    tmp = ""
-    try:
-        now = time.time()
-        sessions = {k: v for k, v in sessions.items() if now - v["ts"] < BADGE_TTL_SECONDS}
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, tmp = tempfile.mkstemp(dir=str(CONFIG_DIR), prefix=".badge-", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"sessions": sessions}, f)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, _badge_path())
-    except Exception as e:
-        log("badge 写入失败: %s" % type(e).__name__, True)
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-
-
-def _session_key(payload: dict) -> str:
-    sid = payload.get("session_id")
-    return sid if isinstance(sid, str) else ""
-
-
-def badge_reset(session_id: str) -> None:
-    """清掉该会话的未读计数。没有记录时不写文件。"""
-    sessions = load_badge()
-    if session_id in sessions:
-        del sessions[session_id]
-        save_badge(sessions)
-
-
-def badge_bump(session_id: str) -> None:
-    # 并发的 hook 之间读-改-写没有加锁，可能丢一次累加；角标只是提示，可以接受
-    sessions = load_badge()
-    sessions[session_id] = {"n": sessions.get(session_id, {}).get("n", 0) + 1, "ts": time.time()}
-    save_badge(sessions)
+def command_source(args) -> str:
+    """显式来源优先；否则按注册表顺序识别宿主的会话环境。"""
+    source = getattr(args, "source", None)
+    if source is not None:
+        if get_harness(source) is None:
+            raise ValueError("未知的事件来源")
+        return source
+    for harness in HARNESSES.values():
+        if os.environ.get(harness.session_env):
+            return harness.name
+    return DEFAULT_HARNESS
 
 
 def cmd_hook(args) -> int:
@@ -1586,18 +1480,17 @@ def _run_hook(args, budget: Budget) -> int:
         log("hook payload 顶层不是对象，跳过推送", True)
         return 0
 
-    # 用户发了新消息 / 会话结束：该会话的未读清零。必须在读配置、解析 transcript、
-    # 任何网络请求之前完成，且这条路径**不能向 stdout 输出任何东西**
-    # （UserPromptSubmit 的 stdout 会被注入 Claude 的上下文）。
-    event = payload.get("hook_event_name")
-    if event in ("UserPromptSubmit", "SessionEnd") and not args.dry_run:
-        badge_reset(_session_key(payload))
-    if event == "UserPromptSubmit":
+    harness = get_harness(getattr(args, "source", DEFAULT_HARNESS))
+    if harness is None:
         return 0
+    payload = harness.normalize_hook(payload)
+    if payload is None:
+        return 0
+    payload["_source"] = harness.name
 
-    cfg = apply_cli_override(load_config(payload.get("cwd")), args.webhook)
+    cfg = apply_cli_override(load_config(payload.get("cwd"), source=harness.name), args.webhook)
     debug = bool(cfg.get("debug"))
-    log("hook event=%s raw=%s" % (payload.get("hook_event_name"), raw[:500]), debug)
+    log(harness.debug_message(payload, raw), debug)
 
     # 配置告警一律记录：静默降级会把内容发到意料之外的地方
     for warning in cfg.get("_warnings", []):
@@ -1608,7 +1501,7 @@ def _run_hook(args, budget: Budget) -> int:
             print("skip: %s" % cfg["_fatal"])
         return 0
 
-    # 只解析一次 transcript，供过滤和卡片共用
+    # 只提取一次事件统计，供过滤和卡片共用。
     stats = parse_for_event(payload)
 
     ok, reason = should_notify(payload, cfg, stats)
@@ -1649,25 +1542,20 @@ def _run_hook(args, budget: Budget) -> int:
                 log("recap skip: 预算不足 剩余 %.1fs" % budget.remaining(), True)
 
     msg = build_hook_message(payload, cfg, stats, budget)
-    # 角标 = 该设备所有会话的未读条数 + 本条；发送成功后才把本会话的计数落盘
-    use_badge = (dest.get("channel") == "bark" and dest.get("badge") is not False)
-    session_key = _session_key(payload)
-    if use_badge:
-        msg.badge = sum(v["n"] for v in load_badge().values()) + 1
     # Reserve time for recap while retaining the configured notification timeout.
     timeout = budget.slice(max(0.1, float(cfg.get("timeout", 5))))
     sent, detail = post(dest, render(cfg, msg), timeout, hosts)
     log("send %s: %s" % ("ok" if sent else "FAIL", detail), debug or not sent)
-    if sent and use_badge and payload.get("hook_event_name") != "SessionEnd":
-        # SessionEnd 本身不累计：会话已经结束，没有后续的 UserPromptSubmit 来清零它
-        badge_bump(session_key)
     return 0
 
 
 # ── send 模式 ───────────────────────────────────────────────────────
 
 def cmd_send(args) -> int:
-    cfg = apply_cli_override(load_config(), args.webhook)
+    source = command_source(args)
+    harness = get_harness(source)
+    client = harness.label
+    cfg = apply_cli_override(load_config(source=source), args.webhook)
     status = (args.status or "info").lower()
     if status not in SEND_STATUSES:
         status = "info"
@@ -1677,24 +1565,24 @@ def cmd_send(args) -> int:
     git = git_info(cwd)
     name = project_name(cwd, git)
 
-    title = args.title or "Claude Code 通知"
+    title = args.title or "%s 通知" % client
     lines = ["**%s %s**" % (icon, title), "状态：%s%s" % (icon, status_cn)]
     if args.message:
         lines.append(truncate(args.message, 1500))
     if args.detail:
         lines.append("---\n%s" % truncate(args.detail, 1500))
 
-    session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    session_id = args.session_id or os.environ.get(harness.session_env, "")
     session_name = args.session_name
     if not session_name and not args.no_session:
-        _, session_name = session_context({"session_id": session_id})
+        _, session_name = session_context({"session_id": session_id, "_source": source})
     fields = [("项目", name), ("分支", git.get("branch") or "-"), ("主机", hostname())]
     if not args.no_session:
         fields.extend(session_fields(session_id))
-    footer = "Claude Code · %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    footer = "%s · %s" % (client, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     subject = name if args.no_session else card_subject(session_name, name)
     msg = Message(title="%s %s · %s" % (icon, title, subject), body="\n".join(lines),
-                  status=status, fields=fields, footer=footer, color=args.color)
+                  status=status, fields=fields, footer=footer, color=args.color, source=client)
 
     if args.dry_run:
         print(json.dumps(render(cfg, msg), ensure_ascii=False, indent=2))
@@ -1724,11 +1612,14 @@ def cmd_send(args) -> int:
 # ── doctor 模式 ─────────────────────────────────────────────────────
 
 def cmd_doctor(args) -> int:
-    cfg = apply_cli_override(load_config(), args.webhook)
+    source = command_source(args)
+    harness = get_harness(source)
+    cfg = apply_cli_override(load_config(source=source), args.webhook)
     channel = active_channel(cfg)
     dest = destination(cfg)
     print("claude-hook-notify 配置检查")
     print("  Python           : %s" % sys.version.split()[0])
+    print("  事件来源         : %s" % source)
     print("  配置来源         : %s" % cfg.get("_source", "(未找到配置文件)"))
     print("  用户级配置路径   : %s%s" % (CONFIG_PATH, "" if CONFIG_PATH.exists() else "  (不存在)"))
     if cfg.get("_project_source"):
@@ -1740,8 +1631,6 @@ def cmd_doctor(args) -> int:
             # 凭据一律不回显；带 URL 的字段只显示协议和主机
             if key in ("webhook_url", "server") and isinstance(cfg.get(key), str):
                 shown = mask(cfg[key])
-            elif key in BOOL_DEST_FIELDS:
-                shown = "关闭" if cfg.get(key) is False else "开启"
             else:
                 shown = "已配置" if cfg.get(key) else (
                     "(未配置)" if key in channel.required else "未配置（可选）")
@@ -1777,7 +1666,9 @@ def cmd_doctor(args) -> int:
         body="**配置测试成功**\n如果你收到这条消息，说明%s配置正确。" % channel.label,
         status="running",
         fields=[("主机", hostname()), ("目录", os.path.basename(os.getcwd()))],
-        footer="Claude Code · %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        footer="%s · %s" % (harness.label,
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        source=harness.label,
     )
     ok, detail = post(dest, channel.render(msg), float(cfg.get("timeout", 5)), allowed_hosts(cfg))
     print("\n%s %s" % ("✓ 测试消息已发送。" if ok else "✗ 发送失败：", "" if ok else detail))
@@ -1787,15 +1678,19 @@ def cmd_doctor(args) -> int:
 # ── 入口 ────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="notify", description="Claude Code → 飞书 / 企业微信 / 钉钉 / Slack / Telegram / Bark 通知")
+    labels = " / ".join(h.label for h in HARNESSES.values())
+    p = argparse.ArgumentParser(prog="notify", description=labels + " → 飞书 / 企业微信 / 钉钉 / Slack / Telegram / Bark 通知")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    h = sub.add_parser("hook", help="从 stdin 读取 Claude Code hook 事件并推送")
+    h = sub.add_parser("hook", help="从 stdin 读取宿主 hook 事件并推送")
+    h.add_argument("--source", choices=tuple(HARNESSES), default=DEFAULT_HARNESS,
+                   help="hook 来源，默认 %s" % DEFAULT_HARNESS)
     h.add_argument("--webhook", default="", help="覆盖当前渠道的 webhook URL")
     h.add_argument("--dry-run", action="store_true", help="只打印当前渠道的请求体 JSON，不实际发送")
     h.set_defaults(func=cmd_hook)
 
     s = sub.add_parser("send", help="手动发送一条通知")
+    s.add_argument("--source", choices=tuple(HARNESSES), help="来源，默认从会话环境识别")
     s.add_argument("-t", "--title", default="", help="标题")
     s.add_argument("-s", "--status", default="info",
                    choices=SEND_STATUSES, help="状态，决定图标与默认颜色")
@@ -1803,9 +1698,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-d", "--detail", default="", help="补充详情，显示在分隔线下方")
     s.add_argument("-c", "--color", default="", help="强制指定卡片颜色（仅飞书生效），如 green/red/orange")
     s.add_argument("--session-id", default="", dest="session_id",
-                   help="会话 ID，默认取环境变量 CLAUDE_CODE_SESSION_ID")
+                   help="会话 ID，默认取所选宿主的会话环境变量")
     s.add_argument("--session-name", default="", dest="session_name",
-                   help="会话名，默认从 transcript 的 ai-title 记录读取")
+                   help="会话名，默认由所选宿主提供")
     s.add_argument("--no-session", action="store_true",
                    help="不在通知里附带会话名和会话 ID")
     s.add_argument("--webhook", default="", help="覆盖当前渠道的 webhook URL")
@@ -1813,6 +1708,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_send)
 
     d = sub.add_parser("doctor", help="检查配置")
+    d.add_argument("--source", choices=tuple(HARNESSES), help="来源，默认从会话环境识别")
     d.add_argument("--webhook", default="", help="覆盖当前渠道的 webhook URL")
     d.add_argument("--test", action="store_true", help="发送一条测试消息")
     d.set_defaults(func=cmd_doctor)
@@ -1845,4 +1741,4 @@ if __name__ == "__main__":
     except Exception as exc:  # hook 绝不能让 Claude Code 卡住或报错
         # 只记异常类型：异常文本可能包含完整 webhook URL，而 URL 等同凭据
         log("未捕获异常: %s (位于 %s)" % (type(exc).__name__, _fault_site()), True)
-        sys.exit(0 if "hook" in sys.argv else 1)
+        sys.exit(0 if len(sys.argv) > 1 and sys.argv[1] == "hook" else 1)

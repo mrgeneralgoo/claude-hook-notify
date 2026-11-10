@@ -15,8 +15,9 @@ description: 给用户发一条通知（飞书、企业微信、钉钉、Slack�
 
 脚本在本插件的 `scripts/notify.py`。按以下顺序确定路径：
 
-1. 环境变量可用时：`"${CLAUDE_PLUGIN_ROOT}/scripts/notify.py"`
-2. 否则用本 SKILL.md 所在目录向上两级：`<skill 目录>/../../scripts/notify.py`
+1. Codex 插件环境可用时：`"${PLUGIN_ROOT}/scripts/notify.py"`
+2. Claude 插件环境可用时：`"${CLAUDE_PLUGIN_ROOT}/scripts/notify.py"`
+3. 否则用本 SKILL.md 所在目录向上两级：`<skill 目录>/../../scripts/notify.py`
 
 下文用 `$NOTIFY` 指代该路径。
 
@@ -25,6 +26,9 @@ description: 给用户发一条通知（飞书、企业微信、钉钉、Slack�
 ```bash
 python3 "$NOTIFY" send -t "标题" -s <状态> -m "正文" [-d "补充详情"]
 ```
+
+在 Codex 中给 `send`、`doctor` 加上 `--source codex`，以使用 Codex 的会话 ID、通知标识和 `.codex/notify.json` 项目配置。
+`CODEX_THREAD_ID` 存在且 `CLAUDE_CODE_SESSION_ID` 不存在时也会自动识别。用户级配置和渠道在两种宿主间共用。
 
 参数：
 
@@ -35,8 +39,9 @@ python3 "$NOTIFY" send -t "标题" -s <状态> -m "正文" [-d "补充详情"]
 | `-m, --message` | 正文，用通用 markdown 写（`**粗体**`、`` `代码` ``、列表、代码块）；渠道不支持的语法会自动降级 |
 | `-d, --detail` | 补充详情，显示在分隔线下方 |
 | `-c, --color` | 强制指定卡片颜色，**仅飞书生效**，其余渠道忽略 |
-| `--session-name` | 覆盖会话名，默认自动从 transcript 的 `ai-title` 记录读取 |
-| `--session-id` | 覆盖会话 ID，默认取环境变量 `CLAUDE_CODE_SESSION_ID` |
+| `--source` | `claude` / `codex`，覆盖自动识别的宿主 |
+| `--session-name` | 覆盖会话名；Claude 默认读取 transcript 的 `ai-title`，Codex 默认退回项目名 |
+| `--session-id` | 覆盖会话 ID，Claude 默认取 `CLAUDE_CODE_SESSION_ID`，Codex 默认取 `CODEX_THREAD_ID` |
 | `--no-session` | 标题退回项目名，且不附带会话 ID |
 | `--dry-run` | 只打印当前渠道的请求体 JSON，不真正发送 |
 
@@ -52,8 +57,8 @@ python3 "$NOTIFY" send -t "标题" -s <状态> -m "正文" [-d "补充详情"]
 | `error` | 🔴 异常 |
 | `info` | ⚪ 信息 |
 
-通知**标题**会用当前会话名（来自 transcript 的 `ai-title` 记录），会话还没生成标题时退回项目名；
-正文下方自动附带项目名、Git 分支、主机名和 session ID 前 8 位（来自 `CLAUDE_CODE_SESSION_ID`）。
+通知**标题**在 Claude 中会用当前会话名（来自 transcript 的 `ai-title` 记录），没有标题时退回项目名；Codex 默认使用项目名。
+正文下方自动附带项目名、Git 分支、主机名和 session ID 前 8 位（来自对应宿主的环境变量）。
 这些都不需要手动填。只有在用户明确要求换个称呼、或要求不要暴露会话信息时，
 才用 `--session-name` / `--no-session` 覆盖。
 
@@ -95,7 +100,7 @@ python3 "$NOTIFY" doctor --test   # 顺便发一条测试消息
 例如 `{"channel": "telegram", "bot_token": "...", "chat_id": "..."}`。
 飞书也可以直接用环境变量 `LARK_WEBHOOK_URL`（及 `LARK_WEBHOOK_SECRET`）。
 
-**不要**建议把 URL、令牌或 `channel` 写进项目里的 `.claude/notify.json` —— 该文件会随仓库传播，
+**不要**建议把 URL、令牌或 `channel` 写进项目里的 `.claude/notify.json` 或 `.codex/notify.json` —— 这些文件会随仓库传播，
 所以插件只允许它按名字引用用户配置里已登记的目的地，自带的目的地字段会被忽略并告警。
 需要按项目分流时，先在用户配置的 `destinations` 里登记，再在项目配置里写 `{"destination": "名字"}`。
 

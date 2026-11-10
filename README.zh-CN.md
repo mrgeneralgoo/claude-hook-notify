@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#运行要求)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#运行要求)
 
-一个 [Claude Code](https://code.claude.com) 插件：Claude 完成任务、需要你授权、或在等你输入时，给你发一条通知。
+支持 [Claude Code](https://code.claude.com) 和 Codex 的通知插件：任务完成、需要你授权时，给你发一条通知。Claude Code 还支持等待输入提醒。
 支持 **飞书 / Lark、企业微信、钉钉、Slack、Telegram、Bark**。
 
 通知内容只生成一次，在每个渠道上都一样；渠道只负责怎么排版、怎么发送。换渠道只需改一行配置。
@@ -19,6 +19,7 @@
 - [支持的渠道](#支持的渠道)
 - [运行要求](#运行要求)
 - [安装](#安装)
+- [接入 Codex](#接入-codex)
 - [配置](#配置)
 - [使用](#使用)
 - [安全](#安全)
@@ -30,9 +31,9 @@
 ## 特性
 
 - **六个渠道，一个配置项**：改 `channel`，同一条通知就发到别处。
-- **自动通知**：任务完成、需要授权、等待输入时，通过 Claude Code hook 自动推送。
+- **自动通知**：通过 Claude Code 或 Codex hook 推送任务完成、授权请求；Claude Code 还支持等待输入提醒。
 - **手动通知**：内置 `notify` skill（「迁移跑完了告诉我一声」），也可以在命令行调用。
-- **内容有用**：标题是会话名，一个项目并行跑多个任务也能一眼分清；正文含你的提问、Claude 的回复、工具调用次数、耗时、项目、Git 分支、主机和会话 ID。
+- **内容有用**：Claude 通知含会话名、提问、回复、工具次数、耗时、项目、Git 分支、主机和会话 ID；Codex 使用事件提供的字段，差异见[接入 Codex](#接入-codex)。
 - **不吵人**：事件白名单、静默时段、最短耗时过滤。
 - **零依赖**：只用 Python 标准库，不需要 `pip install`、`jq` 或 `curl`。
 - **默认安全**：仓库里的配置文件无法决定通知发往哪里，见[安全](#安全)。
@@ -68,13 +69,13 @@
 | `dingtalk` | 钉钉群机器人 | `webhook_url` | `secret`（加签） | Markdown |
 | `slack` | Slack Incoming Webhook | `webhook_url` | | Block Kit |
 | `telegram` | Telegram Bot | `bot_token`、`chat_id` | | 纯文本 |
-| `bark` | Bark（iOS 推送） | `device_key` | `server`（自建服务器）、`icon`（图标图片地址，iOS 15+）、`badge`（`false` 关闭未读角标） | 系统推送（Markdown 正文） |
+| `bark` | Bark（iOS 推送） | `device_key` | `server`（自建服务器）、`icon`（图标图片地址，iOS 15+） | 系统推送（Markdown 正文） |
 
 每个渠道只允许发往其官方域名。使用自建 Bark 服务器或代理时，在用户配置的 `allowed_hosts` 里加上对应主机。
 
 ## 运行要求
 
-- 支持插件的 Claude Code
+- 支持插件的 Claude Code，或本地运行的 Codex（见[接入 Codex](#接入-codex)）
 - Python 3.9 及以上（`PATH` 中有 `python3`）
 - macOS 或 Linux，暂不支持 Windows
 
@@ -138,6 +139,45 @@ python3 scripts/notify.py doctor --test
 
 `doctor` 会打印当前渠道和各项配置的来源，`--test` 会发一条测试消息。收到就说明配好了。
 
+## 接入 Codex
+
+Codex 集成仅使用原生生命周期 hooks，不占用 `config.toml` 的 `notify` 回调，也不需要转发脚本。六个渠道和可信用户配置 `~/.config/claude-hook-notify/config.json` 与 Claude 共用；现有 `CLAUDE_HOOK_NOTIFY_CONFIG` 环境变量继续可用。
+
+### 安装原生 hooks
+
+在本仓库目录中，用支持插件和生命周期 hooks 的 Codex CLI 安装本地版本：
+
+```bash
+codex plugin marketplace add .
+codex plugin add claude-hook-notify@claude-hook-notify
+```
+
+重启 Codex 后，在 CLI 的 `/hooks` 或桌面端 **Settings > Hooks** 中审阅并信任 hooks。根目录 `plugin.json` 指向 `hooks/codex.json`，Claude 的清单保持独立。现有 `.claude-plugin/marketplace.json` 也作为 Codex 兼容的本地插件目录使用。
+
+| Codex 事件 | 行为 | 对应 `events` 配置 |
+|------------|------|-------------------|
+| `Stop` | 推送最终回复 | `Stop`（默认开启） |
+| `PermissionRequest` | 提醒你处理授权；开启摘要时附带授权原因，不发送原始工具参数 | `Notification`（默认开启） |
+| `SubagentStop` | 推送子任务最终回复 | `SubagentStop`（需显式开启） |
+
+适配只使用官方事件字段，不解析格式不稳定的会话文件，也不缓存提问。原生完成事件提供最终回复，不提供原始提问、会话标题、耗时和工具次数，因此「本轮任务」会省略、标题退回项目名。设置 `min_duration_seconds > 0` 时，由于无法证明耗时，完成通知会被过滤，授权提醒不受影响。`stop_hook_active: true` 的续跑结束事件会跳过。
+
+### 项目配置与验证
+
+Codex 读取 `.codex/notify.json`，Claude Code 读取 `.claude/notify.json`；两者都只能收窄行为、按名字引用用户已登记的目的地，不能写凭据或 recap 端点。Codex 不回退读取 Claude 的项目配置。
+
+```bash
+python3 scripts/notify.py doctor --source codex
+python3 scripts/notify.py send --source codex -t "预览" -m "你好" --dry-run
+printf '%s\n' '{"hook_event_name":"Stop","session_id":"demo","cwd":"/tmp","last_assistant_message":"你好"}' | python3 scripts/notify.py hook --source codex --dry-run
+```
+
+`send` 和 `doctor` 根据宿主的会话环境识别来源，或用 `--source` 显式指定；Claude 和 Codex 的环境变量同时存在时优先 Claude。手动 Codex 发送使用 `CODEX_THREAD_ID`，支持 `--session-name`；原生 hooks 始终显式传入 `--source codex`。Codex 通知的脚注和 Bark 分组显示为 `Codex`。
+
+两种宿主都遵守 `include_summary`、静默时段、渠道校验和可选 recap 配置；`--dry-run` 不发送通知、不调用摘要模型。本地命令 hooks 需要执行机器上有脚本，仅在云端或网页安装插件不会自动部署脚本。
+
+官方依据：[Codex hooks](https://learn.chatgpt.com/docs/hooks)、[插件打包](https://developers.openai.com/plugins/build/plugins)。
+
 ## 配置
 
 用户配置位于 `~/.config/claude-hook-notify/config.json`，完整示例见 [config.example.json](config.example.json)。
@@ -196,12 +236,6 @@ python3 scripts/notify.py doctor --test
 
 **开启 recap 会把上述会话文本发送到选定的模型服务，并可能产生费用。** 这是独立于通知渠道的额外目的地，仓库配置不能开启或覆盖它。摘要会丢失细节，不能替代全文查看。
 
-### Bark 未读角标
-
-Bark 图标上的红色角标是**未读条数**：每成功推送一条 +1，在该会话里发送新消息（`UserPromptSubmit`）或会话结束时清零。
-计数保存在 `~/.config/claude-hook-notify/badge.json`（24 小时未更新的会话自动丢弃；并发 hook 偶尔会少计一次）。
-不想要角标时，在 Bark 目的地里写 `"badge": false`。`--dry-run`、`send` 和 `doctor` 不会累计。
-
 ### 切换渠道
 
 改 `channel` 和对应字段即可，其他配置不用动。经常切换的话，可以登记多个目的地，再选一个：
@@ -254,7 +288,7 @@ python3 scripts/notify.py send -t "预览" -s info -m "hello" --dry-run
 
 ## 使用
 
-### 自动通知
+### 自动通知（Claude Code）
 
 | 事件 | 触发时机 | 通知 | 默认开启 |
 |------|----------|------|:--------:|
@@ -363,9 +397,12 @@ python3 -m unittest discover -s tests -v
 ### 目录结构
 
 ```
-scripts/notify.py              # hook / send / doctor 命令、配置加载、统一的 HTTPS 发送
+scripts/notify.py              # hook / send / doctor、配置加载、统一的 HTTPS 发送
+scripts/notify_harnesses/      # 宿主适配接口、Claude/Codex 实现与注册工厂
 scripts/notify_channels/       # 每个渠道一个模块，以及 Message/Channel 契约（base.py）
-skills/notify/SKILL.md         # Claude 用来发通知的 skill
+skills/notify/SKILL.md         # Claude 和 Codex 用来发通知的 skill
+plugin.json                   # Codex 使用的可移植插件清单
+hooks/codex.json              # Codex 生命周期 hooks
 .claude-plugin/plugin.json     # 插件清单与 hook 注册
 docs/DESIGN.md                 # 设计说明
 ```
@@ -382,6 +419,10 @@ docs/DESIGN.md                 # 设计说明
 新渠道的凭据字段会自动被排除在项目配置之外；HTTP 发送、超时和错误脱敏由 `notify.post()` 统一处理。
 
 欢迎提 Issue 和 PR，改动请附带回归用例。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 新增 harness
+
+在 `scripts/notify_harnesses/` 实现 `Harness` 接口并加入注册表。适配器负责事件归一化、会话信息、配置位置和宿主标识；主流程复用过滤、摘要和发送逻辑。通过 `--source` 选择来源，无需在主流程中增加宿主名称判断。新宿主的原生 hook 注册仍按该宿主要求打包，并补充事件与通用消息之间的契约测试。
 
 ## 许可证
 
