@@ -95,7 +95,7 @@ python3 "$NOTIFY" doctor --test   # 顺便发一条测试消息
 | `dingtalk` | `webhook_url` | `secret` |
 | `slack` | `webhook_url` | |
 | `telegram` | `bot_token`、`chat_id` | |
-| `bark` | `device_key` | `server`（自建服务器，需同时配 `allowed_hosts`） |
+| `bark` | `device_key` | `server`（自建服务器，需同时配 `allowed_hosts`）、`icon`（统一图标）、`icons`（按宿主覆盖） |
 
 例如 `{"channel": "telegram", "bot_token": "...", "chat_id": "..."}`。
 飞书也可以直接用环境变量 `LARK_WEBHOOK_URL`（及 `LARK_WEBHOOK_SECRET`）。
@@ -103,6 +103,32 @@ python3 "$NOTIFY" doctor --test   # 顺便发一条测试消息
 **不要**建议把 URL、令牌或 `channel` 写进项目里的 `.claude/notify.json` 或 `.codex/notify.json` —— 这些文件会随仓库传播，
 所以插件只允许它按名字引用用户配置里已登记的目的地，自带的目的地字段会被忽略并告警。
 需要按项目分流时，先在用户配置的 `destinations` 里登记，再在项目配置里写 `{"destination": "名字"}`。
+
+### Bark 图标
+
+从 0.6.1 起，Bark 默认按宿主使用不同图标：Claude 使用 Claude 图标，Codex 使用 OpenAI 图标。
+无需为默认图标添加配置。需要自定义时，在用户配置的 Bark 目的地内填写 `icons`：
+
+```json
+{
+  "channel": "bark",
+  "device_key": "你的 Bark device key",
+  "icons": {
+    "claude": "https://example.com/claude.png",
+    "codex": "https://example.com/codex.png"
+  }
+}
+```
+
+示例中的图片地址需要替换为实际可访问的 HTTP(S) 图片地址。使用具名目的地时，把这些字段放在
+`destinations` 对应的 Bark 条目中。选择顺序是 `icons[当前宿主名]` → 原有 `icon` → 宿主默认图标；
+宿主名使用 `claude` / `codex`，由命令的 `--source` 或会话环境识别，不能从通知文字猜测。
+选中的值为空字符串时使用 Bark 自身图标。
+
+兼容旧版插件时保留原有字符串 `icon`，只在 `icons` 中添加需要区分的宿主；旧版会忽略 `icons`，
+继续读取 `icon`。不要把旧 `icon` 改成对象，也不要把 `icon` / `icons` 写入项目配置。
+图标由 Bark App 下载，不由通知脚本下载；这不改变其他渠道的机器人头像，也不改变标题中表示任务状态的色点。
+可用 `send --source codex --dry-run` 或 `send --source claude --dry-run` 查看各自选中的 `icon`，不会发送通知。
 
 ## 注意
 
