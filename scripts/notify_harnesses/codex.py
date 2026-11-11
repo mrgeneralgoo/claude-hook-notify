@@ -11,6 +11,7 @@ from .base import Harness
 class CodexHarness(Harness):
     name = "codex"
     label = "Codex"
+    notification_icon = "https://cdn.oaistatic.com/assets/apple-touch-icon-mz9nytnj.webp"
     project_dir = ".codex"
     session_env = "CODEX_THREAD_ID"
 

@@ -61,7 +61,7 @@ class TestRegistry(unittest.TestCase):
             self.assertTrue(ch.required)
 
     def test_new_credentials_are_protected_destination_keys(self):
-        for key in ("bot_token", "chat_id", "device_key", "server", "secret", "webhook_url", "icon"):
+        for key in ("bot_token", "chat_id", "device_key", "server", "secret", "webhook_url", "icon", "icons"):
             self.assertIn(key, ln.DESTINATION_KEYS)
 
 
@@ -551,7 +551,8 @@ class TestConfigIntegration(ConfigSandbox):
                          "secret": "oldsecret"})
         cfg = self.load()
         self.assertFalse(cfg.get("_fatal"))
-        self.assertEqual(ln.destination(cfg), {"channel": "bark", "device_key": "abc"})
+        self.assertEqual(ln.destination(cfg), {"channel": "bark", "device_key": "abc",
+                                               "icon": ln.get_harness("claude").notification_icon})
 
     def test_project_config_cannot_set_destination(self):
         self.write_user({"channel": "telegram", "bot_token": TOKEN, "chat_id": "42"})
@@ -571,7 +572,8 @@ class TestConfigIntegration(ConfigSandbox):
                          "channel": "telegram", "bot_token": TOKEN, "chat_id": "42"})
         self.write_notify_project({"destination": "手机"})
         cfg = self.load()
-        self.assertEqual(ln.destination(cfg), {"channel": "bark", "device_key": "abc"})
+        self.assertEqual(ln.destination(cfg), {"channel": "bark", "device_key": "abc",
+                                               "icon": ln.get_harness("claude").notification_icon})
 
     def test_unknown_channel_is_fatal(self):
         self.write_user({"channel": "pigeon", "webhook_url": "https://open.feishu.cn/x"})

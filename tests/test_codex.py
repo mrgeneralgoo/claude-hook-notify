@@ -46,6 +46,76 @@ class TestCodex(unittest.TestCase):
     def write_config(self):
         self.user.write_text(json.dumps(self.config))
 
+    def test_bark_default_icons_follow_harness(self):
+        icons = {}
+        for source in ("claude", "codex"):
+            cfg = ln.load_config(str(self.root), source=source)
+            preview = ln.render(cfg, ln.Message(title="preview"))
+            _, sent = ln.CHANNELS["bark"].request(ln.destination(cfg), preview)
+            icons[source] = sent["icon"]
+            self.assertEqual(preview["icon"], sent["icon"])
+            self.assertEqual(sent["icon"], ln.get_harness(source).notification_icon)
+        self.assertNotEqual(icons["claude"], icons["codex"])
+
+    def test_bark_custom_icons_and_legacy_override(self):
+        for icon, expected in (
+            ({"claude": "https://example.com/custom.png"},
+             ln.get_harness("codex").notification_icon),
+            ({"codex": "https://example.com/codex.png"}, "https://example.com/codex.png"),
+            ("https://example.com/shared.png", "https://example.com/shared.png"),
+            ({"codex": ""}, ""),
+        ):
+            with self.subTest(icon=icon):
+                self.config.pop("icon", None)
+                self.config.pop("icons", None)
+                self.config["icons" if isinstance(icon, dict) else "icon"] = icon
+                self.write_config()
+                cfg = ln.load_config(str(self.root), source="codex")
+                self.assertEqual(cfg["icon"], expected)
+                _, sent = ln.CHANNELS["bark"].request(ln.destination(cfg), {})
+                self.assertEqual(sent.get("icon", ""), expected)
+
+    def test_bark_named_icons_cannot_be_overridden_by_project(self):
+        self.config = {"destination": "phone", "destinations": {"phone": {
+            "channel": "bark", "device_key": "testdevice",
+            "icons": {"codex": "https://example.com/trusted.png"},
+        }}}
+        self.write_config()
+        project = self.root / ".codex"
+        project.mkdir()
+        (project / "notify.json").write_text(json.dumps({
+            "icons": {"codex": "https://example.com/untrusted.png"}}))
+        cfg = ln.load_config(str(self.root), source="codex")
+        self.assertEqual(cfg["icon"], "https://example.com/trusted.png")
+        self.assertTrue(any("icon" in w for w in cfg["_warnings"]))
+
+    def test_per_harness_icon_overrides_legacy_without_changing_other_harness(self):
+        self.config.update(icon="https://example.com/legacy-claude.png",
+                           icons={"codex": "https://example.com/codex.png"})
+        self.write_config()
+        self.assertEqual(ln.load_config(str(self.root), source="claude")["icon"],
+                         "https://example.com/legacy-claude.png")
+        self.assertEqual(ln.load_config(str(self.root), source="codex")["icon"],
+                         "https://example.com/codex.png")
+
+    def test_invalid_icon_mapping_stops_delivery(self):
+        for icons in ({"codex": 42}, [], None, "https://example.com/icon.png"):
+            with self.subTest(icons=icons):
+                self.config["icons"] = icons
+                self.write_config()
+                self.run_hook()
+                self.post.assert_not_called()
+
+    def test_hook_and_manual_send_use_codex_icon(self):
+        self.run_hook()
+        self.assertEqual(self.post.call_args[0][0]["icon"],
+                         ln.get_harness("codex").notification_icon)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = ln.main(["send", "--source", "codex", "-t", "test", "-m", "hello"])
+        self.assertEqual(result, 0)
+        self.assertEqual(self.post.call_args[0][0]["icon"],
+                         ln.get_harness("codex").notification_icon)
+
     def run_hook(self, payload=None, dry_run=False):
         raw = json.dumps(self.native if payload is None else payload)
         args = ["hook", "--source", "codex"]
@@ -244,10 +314,13 @@ class TestCodex(unittest.TestCase):
 class TestCodexPackaging(unittest.TestCase):
     def test_packaged_commands_run_from_a_plugin_path_with_spaces(self):
         repo = Path(__file__).resolve().parent.parent
-        manifest = json.loads((repo / "plugin.json").read_text())
+        # A portable root manifest shadows the compatibility manifest in Codex
+        # 0.167.0 and causes these hooks to disappear from plugin/read.
+        self.assertFalse((repo / "plugin.json").exists())
+        manifest = json.loads((repo / ".codex-plugin" / "plugin.json").read_text())
         claude = json.loads((repo / ".claude-plugin" / "plugin.json").read_text())
         self.assertEqual(manifest["version"], claude["version"])
-        hook_path = manifest["extensions"]["com.openai"]["hooks"]
+        hook_path = manifest["hooks"]
         hooks = json.loads((repo / hook_path).read_text())["hooks"]
         self.assertEqual(set(hooks), {"Stop", "SubagentStop", "PermissionRequest"})
         self.assertNotIn("UserPromptSubmit", claude["hooks"])

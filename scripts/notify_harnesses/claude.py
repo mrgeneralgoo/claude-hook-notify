@@ -22,6 +22,7 @@ def transcript_for(payload: dict) -> tuple[str, bool]:
 class ClaudeHarness(Harness):
     name = "claude"
     label = "Claude Code"
+    notification_icon = "https://claude.ai/images/claude_app_icon.png"
     project_dir = ".claude"
     legacy_project_config = "lark.json"
     session_env = "CLAUDE_CODE_SESSION_ID"

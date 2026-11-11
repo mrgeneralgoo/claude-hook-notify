@@ -1,15 +1,11 @@
 {
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "claude-hook-notify",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Multi-channel notifications for Claude Code and Codex: Feishu / Lark, WeCom, DingTalk, Slack, Telegram, and Bark.",
   "author": {"name": "mrgeneralgoo"},
   "homepage": "https://github.com/mrgeneralgoo/claude-hook-notify",
   "repository": "https://github.com/mrgeneralgoo/claude-hook-notify",
   "license": "MIT",
-  "extensions": {
-    "com.openai": {
-      "hooks": "./hooks/codex.json"
-    }
-  }
+  "skills": "./skills/",
+  "hooks": "./hooks/codex.json"
 }

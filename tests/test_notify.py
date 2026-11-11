@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -2533,7 +2534,7 @@ class TestCardHasNoBlankLines(unittest.TestCase):
             ["send", "-t", "构建失败", "-s", "failed", "-m", "分支 feat/x 编译不通过",
              "-d", "error[E0308]", "--no-session", "--dry-run"])
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
+        with contextlib.redirect_stdout(buf), mock.patch.object(ln, "load_config", return_value={}):
             ln.cmd_send(args)
         body = self._body(json.loads(buf.getvalue()))
         self.assertNotIn("\n\n", body, body)

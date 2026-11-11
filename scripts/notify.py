@@ -389,6 +389,16 @@ def load_config(cwd: str | None = None, source: str = DEFAULT_HARNESS) -> dict:
         if env_secret and active_channel(cfg) is CHANNELS["lark"]:
             cfg["secret"] = env_secret
 
+    # 图标只来自可信目的地。先按宿主解析，再交给现有 URL/凭据校验。
+    if active_channel(cfg) is CHANNELS["bark"]:
+        icons = cfg.pop("icons", {})
+        if not isinstance(icons, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in icons.items()):
+            cfg["_fatal"] = "icons 必须是宿主名到图标地址的字符串映射，已停止发送。"
+            warnings.append(cfg["_fatal"])
+            icons = {}
+        cfg["icon"] = icons.get(harness.name, cfg.get("icon", harness.notification_icon))
+
     validate_config(cfg, warnings)
     # 凭据放到最后校验：此时环境变量已经覆盖过，不会因为低优先级的错误值
     # 留下一个撤销不掉的 _fatal
@@ -786,7 +796,10 @@ def post(dest: dict, payload: dict, timeout: float = 5.0,
 def render(cfg: dict, msg: Message) -> dict:
     """用当前渠道渲染消息。渠道非法时（已有 _fatal）退回默认渠道，只用于 dry-run 预览。"""
     channel = active_channel(cfg) or CHANNELS[DEFAULT_CHANNEL]
-    return channel.render(msg)
+    body = channel.render(msg)
+    if channel is CHANNELS["bark"] and cfg.get("icon"):
+        body["icon"] = cfg["icon"]
+    return body
 
 
 # ── 运行环境信息 ────────────────────────────────────────────────────

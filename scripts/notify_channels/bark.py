@@ -74,7 +74,7 @@ class BarkChannel(Channel):
     label = "Bark"
     default_hosts = ("api.day.app",)
     required = ("device_key",)
-    optional = ("server", "icon")
+    optional = ("server", "icon", "icons")
 
     def render(self, msg: Message) -> dict:
         title = truncate(md_to_plain(msg.title), 200).replace("\n", " ")

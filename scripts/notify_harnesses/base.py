@@ -13,6 +13,7 @@ class Harness:
     legacy_project_config: str = ""
     session_env: str = ""
     continuation_label: str = ""
+    notification_icon: str = ""
     permission_details_require_summary: bool = True
 
     def normalize_hook(self, payload: dict) -> dict | None:

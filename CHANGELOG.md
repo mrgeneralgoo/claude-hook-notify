@@ -2,6 +2,18 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.1] - 2026-11-11
+
+### 修复
+
+- Codex 改用 `.codex-plugin/plugin.json`，移除会遮蔽兼容清单的根目录清单；修复 Codex 0.167.0 安装成功却未发现 hooks 的问题。
+- Claude Code 原有 hooks 和命令保持不变。
+
+### 新增
+
+- Bark 默认按宿主选择通知图标：Claude 使用 Claude 图标，Codex 使用 OpenAI 图标。
+- 用户目的地的 `icons` 支持 `claude` / `codex` URL 映射；旧的单 URL 仍作为所有宿主的统一覆盖，空字符串表示使用 Bark 自身图标。图标仅由 Bark App 下载。
+
 ## [0.6.0] - 2026-11-10
 
 ### 新增

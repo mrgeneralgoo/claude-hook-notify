@@ -153,7 +153,9 @@ codex plugin marketplace add .
 codex plugin add claude-hook-notify@claude-hook-notify
 ```
 
-Restart Codex, then review and trust the hooks using `/hooks` in the CLI or **Settings > Hooks** in the desktop app. The root `plugin.json` selects `hooks/codex.json`; the existing Claude manifest remains separate. The repository's `.claude-plugin/marketplace.json` also serves as a compatible local Codex catalog.
+Restart Codex, then review and trust the hooks using `/hooks` in the CLI or **Settings > Hooks** in the desktop app. `.codex-plugin/plugin.json` selects `hooks/codex.json`; the existing Claude manifest remains separate. The repository's `.claude-plugin/marketplace.json` also serves as a compatible local Codex catalog.
+
+This project uses the Codex compatibility manifest: on Codex 0.167.0, this plugin's hooks declared in its portable root `plugin.json` were not loaded, and that manifest shadowed `.codex-plugin/plugin.json`. Do not add a root `plugin.json` alongside it. This layout leaves Claude Code's `.claude-plugin/plugin.json` and hooks unchanged.
 
 | Codex event | Behavior | `events` setting |
 |-------------|----------|------------------|
@@ -178,6 +180,14 @@ printf '%s\n' '{"hook_event_name":"Stop","session_id":"demo","cwd":"/tmp","last_
 Both harnesses respect `include_summary`, quiet hours, channel validation, and optional recaps. `--dry-run` sends nothing and does not request a recap. Local command hooks require the scripts on the execution machine; installing a plugin in a cloud/web surface alone does not deploy them.
 
 Official references: [Codex hooks](https://learn.chatgpt.com/docs/hooks), [plugin packaging](https://developers.openai.com/plugins/build/plugins).
+
+Bark defaults to a different icon for each harness (Claude / OpenAI), downloaded by the Bark app. Override them in your user-level Bark destination:
+
+```json
+"icons": {"claude": "https://example.com/claude.png", "codex": "https://example.com/codex.png"}
+```
+
+Priority: `icons[harness]` → legacy `icon` → harness default. Older plugins ignore `icons` and continue using `icon`. An empty string uses Bark's own icon. Project config cannot set icons. Other channels' bot avatars are managed by their platforms.
 
 ## Configuration
 
@@ -402,7 +412,7 @@ scripts/notify.py              # hook / send / doctor, config loading, shared HT
 scripts/notify_harnesses/      # harness contract, Claude/Codex adapters, registry factory
 scripts/notify_channels/       # one module per channel, plus the Message/Channel contract (base.py)
 skills/notify/SKILL.md         # the skill Claude and Codex use to send notifications
-plugin.json                   # Codex-compatible portable plugin manifest
+.codex-plugin/plugin.json      # Codex compatibility manifest and hook entry point
 hooks/codex.json              # Codex lifecycle hooks
 .claude-plugin/plugin.json     # plugin manifest and hook registration
 docs/DESIGN.md                 # design notes (Chinese)

@@ -152,7 +152,9 @@ codex plugin marketplace add .
 codex plugin add claude-hook-notify@claude-hook-notify
 ```
 
-重启 Codex 后，在 CLI 的 `/hooks` 或桌面端 **Settings > Hooks** 中审阅并信任 hooks。根目录 `plugin.json` 指向 `hooks/codex.json`，Claude 的清单保持独立。现有 `.claude-plugin/marketplace.json` 也作为 Codex 兼容的本地插件目录使用。
+重启 Codex 后，在 CLI 的 `/hooks` 或桌面端 **Settings > Hooks** 中审阅并信任 hooks。`.codex-plugin/plugin.json` 指向 `hooks/codex.json`，Claude 的清单保持独立。现有 `.claude-plugin/marketplace.json` 也作为 Codex 兼容的本地插件目录使用。
+
+本项目使用 Codex 兼容清单：在 Codex 0.167.0 上，本插件原有根目录可移植 `plugin.json` 的 hooks 声明未被加载，而且会遮蔽 `.codex-plugin/plugin.json`。因此不要另外添加根目录 `plugin.json`。此布局不改变 Claude Code 的 `.claude-plugin/plugin.json` 或 hooks。
 
 | Codex 事件 | 行为 | 对应 `events` 配置 |
 |------------|------|-------------------|
@@ -177,6 +179,14 @@ printf '%s\n' '{"hook_event_name":"Stop","session_id":"demo","cwd":"/tmp","last_
 两种宿主都遵守 `include_summary`、静默时段、渠道校验和可选 recap 配置；`--dry-run` 不发送通知、不调用摘要模型。本地命令 hooks 需要执行机器上有脚本，仅在云端或网页安装插件不会自动部署脚本。
 
 官方依据：[Codex hooks](https://learn.chatgpt.com/docs/hooks)、[插件打包](https://developers.openai.com/plugins/build/plugins)。
+
+Bark 默认按宿主使用不同图标（Claude / OpenAI），由 Bark App 下载。可以在用户配置的 Bark 目的地里分别覆盖：
+
+```json
+"icons": {"claude": "https://example.com/claude.png", "codex": "https://example.com/codex.png"}
+```
+
+优先级为 `icons[宿主名]` → 旧的 `icon` 统一覆盖 → 宿主默认图标。旧版插件会忽略 `icons`，仍使用 `icon`。空字符串使用 Bark 自身图标。图标不能由项目配置指定。其他渠道的机器人头像由平台管理。
 
 ## 配置
 
@@ -401,7 +411,7 @@ scripts/notify.py              # hook / send / doctor、配置加载、统一的
 scripts/notify_harnesses/      # 宿主适配接口、Claude/Codex 实现与注册工厂
 scripts/notify_channels/       # 每个渠道一个模块，以及 Message/Channel 契约（base.py）
 skills/notify/SKILL.md         # Claude 和 Codex 用来发通知的 skill
-plugin.json                   # Codex 使用的可移植插件清单
+.codex-plugin/plugin.json      # Codex 兼容清单与 hook 文件入口
 hooks/codex.json              # Codex 生命周期 hooks
 .claude-plugin/plugin.json     # 插件清单与 hook 注册
 docs/DESIGN.md                 # 设计说明
